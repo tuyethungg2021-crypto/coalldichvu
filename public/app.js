@@ -67,7 +67,7 @@ async function renderTab(){
 }
 async function userServices(){
   services = await api('/api/services');
-  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Dịch vụ thuê sim</h2><p class="muted">Chọn dịch vụ và nhà mạng muốn thuê. Web sẽ gọi API thật để lấy số, sau đó bạn bấm Lấy code.</p><div class="servicegrid">${services.map(s=>`<div class="svc"><h3>${esc(s.name)}</h3><p class="muted">${esc(s.description||'')}</p><div class="field"><label>Nhà mạng</label><select id="carrier_${s.id}">${carrierOptions(s.network)}</select></div><div class="price">${fmt(s.price)}</div><button onclick="rent('${s.id}')">Thuê sim</button></div>`).join('')}</div></div><div class="card"><h2>Sim đang thuê</h2><div id="activeRentals"></div></div>`);
+  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Dịch vụ thuê sim</h2><div class="servicegrid">${services.map(s=>`<div class="svc"><h3>${esc(s.name)}</h3><p class="muted">${esc(s.description||'')}</p><div class="field"><label>Nhà mạng</label><select id="carrier_${s.id}">${carrierOptions(s.network)}</select></div><div class="price">${fmt(s.price)}</div><button onclick="rent('${s.id}')">Thuê sim</button></div>`).join('')}</div></div><div class="card"><h2>Sim đang thuê</h2><div id="activeRentals"></div></div>`);
   rentals = await api('/api/rentals');
   $('#activeRentals').innerHTML = tableRentals(rentals.filter(r=>String(r.status).includes('chờ') || r.status==='Đang thuê'));
 }

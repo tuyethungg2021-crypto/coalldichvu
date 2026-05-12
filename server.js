@@ -295,7 +295,7 @@ app.post('/api/admin/sim-api/sync-apps', auth, adminOnly, async (req, res) => {
       const apiCost = Math.floor(Number(a.Cost || 0));
       let s = db.services.find(x => String(x.external_app_id || '') === appId);
       if (s) { s.name = name; s.api_cost = apiCost; if (!s.price || Number(req.body.overwritePrice)) s.price = apiCost; s.updated_at = now(); updated++; }
-      else { db.services.push({ id: uid('s'), name, network: 'Viettel,Mobi,Vina,VNMB,ITelecom', price: apiCost, visible: 0, description: 'Dịch vụ API mới đồng bộ - đang ẩn, admin tự bật khi muốn bán', external_app_id: appId, api_cost: apiCost, created_at: now(), updated_at: now() }); added++; }
+      else { db.services.push({ id: uid('s'), name, network: 'Viettel,Mobi,Vina,VNMB,ITelecom', price: apiCost, visible: 0, description: '', external_app_id: appId, api_cost: apiCost, created_at: now(), updated_at: now() }); added++; }
     });
     saveDb(); res.json({ ok: true, added, updated, total: apps.length });
   } catch (e) { res.status(500).json({ error: e.message || 'Không đồng bộ được app API' }); }
