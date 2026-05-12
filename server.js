@@ -28,7 +28,7 @@ function daysInactive(u) {
 }
 
 const defaults = {
-  users: [], services: [], rentals: [], deposits: [], notifications: [],
+  users: [], services: [], rentals: [], deposits: [], notifications: [], dmxProducts: [],
   settings: {
     siteName: 'Có All Dịch Vụ',
     brandText: 'Thuê sim nhanh - nhiều nhà mạng - quản lý dễ dàng',
@@ -57,6 +57,7 @@ function saveDb() {
 }
 function migrate() {
   let changed = false;
+  if (!Array.isArray(db.dmxProducts)) { db.dmxProducts = []; changed = true; }
   if (!db.users.find(u => u.username === ADMIN_USERNAME)) {
     db.users.push({ id: uid('u'), username: ADMIN_USERNAME, password_hash: bcrypt.hashSync(ADMIN_PASSWORD, 10), role: 'admin', balance: 0, created_at: now(), last_login: now(), status: 'active' });
     changed = true;
@@ -68,7 +69,7 @@ function migrate() {
       ['Telegram', 'MobiFone', 3500, 'Thuê sim nhận OTP Telegram'],
       ['Shopee', 'Vietnamobile', 2000, 'Thuê sim nhận OTP Shopee'],
       ['Google/Gmail', 'Viettel', 4000, 'Thuê sim nhận OTP Google']
-    ].forEach(s => db.services.push({ id: uid('s'), name: s[0], network: s[1], price: s[2], visible: 1, description: s[3], created_at: now(), updated_at: now() }));
+    ].forEach(s => db.services.push({ id: uid('s'), name: s[0], network: s[1], price: s[2], visible: 0, description: s[3], created_at: now(), updated_at: now() }));
     changed = true;
   }
   if (changed) saveDb();
@@ -191,12 +192,15 @@ app.post('/api/rentals/:id/check-code', auth, async (req, res) => {
     if (Number(apiResult.ResponseCode) === 0) {
       const result = apiResult.Result || {};
       r.status = 'Đã nhận code'; r.otp_code = String(result.Code || ''); r.sms = String(result.SMS || ''); r.ended_at = now();
-    } else if (Number(apiResult.ResponseCode) === 2) { r.status = 'Không nhận được code'; r.ended_at = now(); }
+    } else if (Number(apiResult.ResponseCode) === 2) {
+      r.status = 'Hết hạn không nhận được OTP'; r.ended_at = now();
+      if (!r.refunded) { const owner = db.users.find(u => u.id === r.user_id); if (owner) owner.balance = Math.floor(Number(owner.balance || 0) + Number(r.price || 0)); r.refunded = 1; r.note = 'Đã tự hoàn tiền vì hết hạn chờ OTP'; }
+    }
     r.note = apiResult.Msg || r.note || ''; saveDb();
-    res.json({ rental: r, api: apiResult });
+    res.json({ rental: r, api: apiResult, user: cleanUser(db.users.find(u => u.id === r.user_id)) });
   } catch (e) { res.status(500).json({ error: e.message || 'Không lấy được code' }); }
 });
-app.post('/api/rentals/:id/cancel', auth, async (req, res) => {
+app.post('/api/rentals/:id/cancel', auth, adminOnly, async (req, res) => {
   try {
     const r = db.rentals.find(x => x.id === req.params.id && (x.user_id === req.user.id || req.user.role === 'admin'));
     if (!r) return res.status(404).json({ error: 'Không tìm thấy lượt thuê' });
@@ -248,6 +252,27 @@ app.patch('/api/admin/services/:id', auth, adminOnly, (req, res) => {
 });
 app.delete('/api/admin/services/:id', auth, adminOnly, (req, res) => { db.services = db.services.filter(s => s.id !== req.params.id); saveDb(); res.json({ ok: true }); });
 
+
+app.get('/api/dmx-products', auth, (req, res) => {
+  const rows = (db.dmxProducts || [])
+    .filter(p => req.user.role === 'admin' || Number(p.visible) === 1)
+    .sort((a,b) => String(a.category || '').localeCompare(String(b.category || ''), 'vi') || String(a.name || '').localeCompare(String(b.name || ''), 'vi'));
+  res.json(rows);
+});
+app.post('/api/admin/dmx-products', auth, adminOnly, (req, res) => {
+  const p = { id: uid('dmx'), name: String(req.body.name || '').trim(), category: String(req.body.category || 'Khác').trim(), price: Math.floor(Number(req.body.price || 0)), bulkDiscount: String(req.body.bulkDiscount || '').trim(), description: String(req.body.description || '').trim(), image: String(req.body.image || '').trim(), visible: req.body.visible ? 1 : 0, created_at: now(), updated_at: now() };
+  if (!p.name) return res.status(400).json({ error: 'Thiếu tên sản phẩm' });
+  db.dmxProducts.push(p); saveDb(); res.json(p);
+});
+app.patch('/api/admin/dmx-products/:id', auth, adminOnly, (req, res) => {
+  const p = (db.dmxProducts || []).find(x => x.id === req.params.id); if (!p) return res.status(404).json({ error: 'Không tìm thấy sản phẩm' });
+  ['name','category','bulkDiscount','description','image'].forEach(k => { if (req.body[k] !== undefined) p[k] = String(req.body[k]); });
+  if (req.body.price !== undefined) p.price = Math.floor(Number(req.body.price || 0));
+  if (req.body.visible !== undefined) p.visible = req.body.visible ? 1 : 0;
+  p.updated_at = now(); saveDb(); res.json(p);
+});
+app.delete('/api/admin/dmx-products/:id', auth, adminOnly, (req, res) => { db.dmxProducts = (db.dmxProducts || []).filter(p => p.id !== req.params.id); saveDb(); res.json({ ok: true }); });
+
 app.get('/api/admin/rentals', auth, adminOnly, (req, res) => res.json(db.rentals.map(r => ({ ...r, username: (db.users.find(u => u.id === r.user_id) || {}).username || 'unknown' })).sort((a,b) => b.rented_at.localeCompare(a.rented_at))));
 app.patch('/api/admin/rentals/:id', auth, adminOnly, (req, res) => {
   const r = db.rentals.find(x => x.id === req.params.id); if (!r) return res.status(404).json({ error: 'Không tìm thấy lượt thuê' });
@@ -281,7 +306,7 @@ app.post('/api/admin/sim-api/sync-apps', auth, adminOnly, async (req, res) => {
       const apiCost = Math.floor(Number(a.Cost || 0));
       let s = db.services.find(x => String(x.external_app_id || '') === appId);
       if (s) { s.name = name; s.api_cost = apiCost; if (!s.price || Number(req.body.overwritePrice)) s.price = apiCost; s.updated_at = now(); updated++; }
-      else { db.services.push({ id: uid('s'), name, network: 'Viettel,Mobi,Vina,VNMB,ITelecom', price: apiCost, visible: 1, description: 'Đồng bộ từ API chaycodeso3', external_app_id: appId, api_cost: apiCost, created_at: now(), updated_at: now() }); added++; }
+      else { db.services.push({ id: uid('s'), name, network: 'Viettel,Mobi,Vina,VNMB,ITelecom', price: apiCost, visible: 0, description: 'Đồng bộ từ API chaycodeso3', external_app_id: appId, api_cost: apiCost, created_at: now(), updated_at: now() }); added++; }
     });
     saveDb(); res.json({ ok: true, added, updated, total: apps.length });
   } catch (e) { res.status(500).json({ error: e.message || 'Không đồng bộ được app API' }); }
