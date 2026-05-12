@@ -34,7 +34,9 @@ const defaults = {
     brandText: 'Thuê sim nhanh - nhiều nhà mạng - quản lý dễ dàng',
     logoUrl: '', adUrl: '', themeColor: '#2563eb', layoutMode: 'modern',
     depositInfo: 'Ngân hàng: MB Bank\nSố tài khoản: 0123456789\nChủ tài khoản: HUNG NBYT\nNội dung: nap username',
-    qrImage: ''
+    qrImage: '',
+    apiBaseUrl: 'https://chaycodeso3.com/api',
+    apiKey: '248c26ea0cd1371009db5dd443339ca1'
   }
 };
 let db = loadDb();
@@ -97,9 +99,41 @@ function auth(req, res, next) {
   } catch { res.status(401).json({ error: 'Phiên đăng nhập hết hạn' }); }
 }
 function adminOnly(req, res, next) { if (req.user.role !== 'admin') return res.status(403).json({ error: 'Chỉ admin được dùng chức năng này' }); next(); }
+function getApiKey() { return String(db.settings.apiKey || process.env.SIM_API_KEY || '').trim(); }
+function getApiBase() { return String(db.settings.apiBaseUrl || 'https://chaycodeso3.com/api').trim(); }
+async function simApi(params) {
+  const key = getApiKey();
+  if (!key) throw new Error('Admin chưa cài API key');
+  const url = new URL(getApiBase());
+  Object.entries({ ...params, apik: key }).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && String(v) !== '') url.searchParams.set(k, String(v));
+  });
+  const r = await fetch(url.toString(), { method: 'GET' });
+  const text = await r.text();
+  let data;
+  try { data = JSON.parse(text); } catch { throw new Error('API trả về không phải JSON: ' + text.slice(0, 120)); }
+  return data;
+}
+function safeSettingsForUser(settings, isAdmin) {
+  const out = { ...settings };
+  if (!isAdmin) delete out.apiKey;
+  if (isAdmin && out.apiKey) out.apiKeyMasked = out.apiKey.slice(0, 6) + '...' + out.apiKey.slice(-4);
+  return out;
+}
 
 app.get('/api/health', (req, res) => res.json({ ok: true, app: 'Có All Dịch Vụ', db: 'json', time: now() }));
-app.get('/api/settings', (req, res) => res.json(db.settings));
+app.get('/api/settings', (req, res) => {
+  let isAdmin = false;
+  try {
+    const token = (req.headers.authorization || '').replace(/^Bearer\s+/, '');
+    if (token) {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      const u = db.users.find(x => x.id === decoded.id);
+      isAdmin = !!u && u.role === 'admin';
+    }
+  } catch {}
+  res.json(safeSettingsForUser(db.settings, isAdmin));
+});
 
 app.post('/api/register', (req, res) => {
   const username = String(req.body.username || '').trim().toLowerCase();
@@ -127,16 +161,53 @@ app.get('/api/services', auth, (req, res) => {
   const rows = db.services.filter(s => req.user.role === 'admin' || Number(s.visible) === 1).sort((a,b) => (b.visible-a.visible) || a.name.localeCompare(b.name));
   res.json(rows);
 });
-app.post('/api/rentals', auth, (req, res) => {
-  const service = db.services.find(s => s.id === req.body.service_id && Number(s.visible) === 1);
-  if (!service) return res.status(404).json({ error: 'Dịch vụ không tồn tại hoặc đang ẩn' });
-  if ((req.user.balance || 0) < service.price) return res.status(400).json({ error: 'Số dư không đủ, vui lòng nạp thêm tiền' });
-  req.user.balance -= service.price;
-  const rental = { id: uid('r'), user_id: req.user.id, service_id: service.id, service_name: service.name, network: service.network, phone_number: '0' + Math.floor(100000000 + Math.random()*899999999), price: service.price, status: 'Đang thuê', rented_at: now(), ended_at: '', otp_code: '', note: '' };
-  db.rentals.push(rental); saveDb();
-  res.json({ rental, user: cleanUser(req.user) });
+app.post('/api/rentals', auth, async (req, res) => {
+  try {
+    const service = db.services.find(s => s.id === req.body.service_id && Number(s.visible) === 1);
+    if (!service) return res.status(404).json({ error: 'Dịch vụ không tồn tại hoặc đang ẩn' });
+    if (!service.external_app_id) return res.status(400).json({ error: 'Dịch vụ này chưa gắn App ID API. Admin hãy đồng bộ API hoặc nhập App ID.' });
+    if ((req.user.balance || 0) < service.price) return res.status(400).json({ error: 'Số dư web không đủ, vui lòng nạp thêm tiền' });
+    const carrier = String(req.body.carrier || service.network || '').trim();
+    const apiResult = await simApi({ act: 'number', appId: service.external_app_id, carrier });
+    if (Number(apiResult.ResponseCode) !== 0) return res.status(400).json({ error: apiResult.Msg || 'API không cấp được số' });
+    const result = apiResult.Result || {};
+    const cost = Math.floor(Number(result.Cost || service.price || 0));
+    req.user.balance = Math.floor(Number(req.user.balance || 0) - Number(service.price || cost));
+    const number = String(result.Number || '');
+    const displayNumber = number.startsWith('0') ? number : '0' + number;
+    const rental = { id: uid('r'), user_id: req.user.id, service_id: service.id, service_name: service.name, network: carrier, phone_number: displayNumber, price: service.price, api_cost: cost, external_id: String(result.Id || ''), api_app_id: String(service.external_app_id), status: 'Đang chờ code', rented_at: now(), ended_at: '', otp_code: '', sms: '', note: apiResult.Msg || '' };
+    db.rentals.push(rental); saveDb();
+    res.json({ rental, user: cleanUser(req.user), api: apiResult });
+  } catch (e) { res.status(500).json({ error: e.message || 'Không gọi được API thuê sim' }); }
 });
 app.get('/api/rentals', auth, (req, res) => res.json(db.rentals.filter(r => r.user_id === req.user.id).sort((a,b) => b.rented_at.localeCompare(a.rented_at))));
+
+app.post('/api/rentals/:id/check-code', auth, async (req, res) => {
+  try {
+    const r = db.rentals.find(x => x.id === req.params.id && (x.user_id === req.user.id || req.user.role === 'admin'));
+    if (!r) return res.status(404).json({ error: 'Không tìm thấy lượt thuê' });
+    if (!r.external_id) return res.status(400).json({ error: 'Lượt thuê này không có ID API' });
+    const apiResult = await simApi({ act: 'code', id: r.external_id });
+    if (Number(apiResult.ResponseCode) === 0) {
+      const result = apiResult.Result || {};
+      r.status = 'Đã nhận code'; r.otp_code = String(result.Code || ''); r.sms = String(result.SMS || ''); r.ended_at = now();
+    } else if (Number(apiResult.ResponseCode) === 2) { r.status = 'Không nhận được code'; r.ended_at = now(); }
+    r.note = apiResult.Msg || r.note || ''; saveDb();
+    res.json({ rental: r, api: apiResult });
+  } catch (e) { res.status(500).json({ error: e.message || 'Không lấy được code' }); }
+});
+app.post('/api/rentals/:id/cancel', auth, async (req, res) => {
+  try {
+    const r = db.rentals.find(x => x.id === req.params.id && (x.user_id === req.user.id || req.user.role === 'admin'));
+    if (!r) return res.status(404).json({ error: 'Không tìm thấy lượt thuê' });
+    if (!r.external_id) return res.status(400).json({ error: 'Lượt thuê này không có ID API' });
+    const apiResult = await simApi({ act: 'expired', id: r.external_id });
+    if (Number(apiResult.ResponseCode) === 0 || Number(apiResult.ResponseCode) === 2) { r.status = 'Đã hủy'; r.ended_at = now(); }
+    r.note = apiResult.Msg || r.note || ''; saveDb();
+    res.json({ rental: r, api: apiResult });
+  } catch (e) { res.status(500).json({ error: e.message || 'Không hủy được lượt thuê' }); }
+});
+
 
 app.post('/api/deposits', auth, upload.single('proof'), (req, res) => {
   const amount = Math.floor(Number(req.body.amount || 0));
@@ -164,14 +235,15 @@ app.delete('/api/admin/users/:id', auth, adminOnly, (req, res) => {
 });
 
 app.post('/api/admin/services', auth, adminOnly, (req, res) => {
-  const s = { id: uid('s'), name: String(req.body.name || '').trim(), network: String(req.body.network || '').trim(), price: Math.floor(Number(req.body.price || 0)), visible: req.body.visible ? 1 : 0, description: String(req.body.description || ''), created_at: now(), updated_at: now() };
+  const s = { id: uid('s'), name: String(req.body.name || '').trim(), network: String(req.body.network || '').trim(), price: Math.floor(Number(req.body.price || 0)), visible: req.body.visible ? 1 : 0, description: String(req.body.description || ''), external_app_id: String(req.body.external_app_id || '').trim(), api_cost: Math.floor(Number(req.body.api_cost || 0)), created_at: now(), updated_at: now() };
   if (!s.name || !s.network) return res.status(400).json({ error: 'Thiếu tên dịch vụ hoặc nhà mạng' }); db.services.push(s); saveDb(); res.json(s);
 });
 app.patch('/api/admin/services/:id', auth, adminOnly, (req, res) => {
   const s = db.services.find(x => x.id === req.params.id); if (!s) return res.status(404).json({ error: 'Không tìm thấy dịch vụ' });
-  ['name','network','description'].forEach(k => { if (req.body[k] !== undefined) s[k] = String(req.body[k]); });
+  ['name','network','description','external_app_id'].forEach(k => { if (req.body[k] !== undefined) s[k] = String(req.body[k]); });
   if (req.body.price !== undefined) s.price = Math.floor(Number(req.body.price || 0));
   if (req.body.visible !== undefined) s.visible = req.body.visible ? 1 : 0;
+  if (req.body.api_cost !== undefined) s.api_cost = Math.floor(Number(req.body.api_cost || 0));
   s.updated_at = now(); saveDb(); res.json(s);
 });
 app.delete('/api/admin/services/:id', auth, adminOnly, (req, res) => { db.services = db.services.filter(s => s.id !== req.params.id); saveDb(); res.json({ ok: true }); });
@@ -190,7 +262,30 @@ app.patch('/api/admin/deposits/:id', auth, adminOnly, (req, res) => {
 });
 app.get('/api/admin/notifications', auth, adminOnly, (req, res) => res.json(db.notifications.sort((a,b) => b.created_at.localeCompare(a.created_at)).slice(0,100)));
 app.patch('/api/admin/notifications/read', auth, adminOnly, (req, res) => { db.notifications.forEach(n => n.read = 1); saveDb(); res.json({ ok: true }); });
-app.patch('/api/admin/settings', auth, adminOnly, (req, res) => { ['siteName','brandText','logoUrl','adUrl','themeColor','layoutMode','depositInfo','qrImage'].forEach(k => { if (req.body[k] !== undefined) db.settings[k] = String(req.body[k]); }); saveDb(); res.json(db.settings); });
+app.patch('/api/admin/settings', auth, adminOnly, (req, res) => { ['siteName','brandText','logoUrl','adUrl','themeColor','layoutMode','depositInfo','qrImage','apiBaseUrl','apiKey'].forEach(k => { if (req.body[k] !== undefined) db.settings[k] = String(req.body[k]); }); saveDb(); res.json(safeSettingsForUser(db.settings, true)); });
+app.get('/api/admin/sim-api/account', auth, adminOnly, async (req, res) => {
+  try { res.json(await simApi({ act: 'account' })); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get('/api/admin/sim-api/apps', auth, adminOnly, async (req, res) => {
+  try { res.json(await simApi({ act: 'app' })); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/admin/sim-api/sync-apps', auth, adminOnly, async (req, res) => {
+  try {
+    const data = await simApi({ act: 'app' });
+    if (Number(data.ResponseCode) !== 0) return res.status(400).json({ error: data.Msg || 'API không trả danh sách app', api: data });
+    const apps = Array.isArray(data.Result) ? data.Result : [];
+    let added = 0, updated = 0;
+    apps.forEach(a => {
+      const appId = String(a.Id || '').trim(); if (!appId) return;
+      const name = String(a.Name || ('App ' + appId));
+      const apiCost = Math.floor(Number(a.Cost || 0));
+      let s = db.services.find(x => String(x.external_app_id || '') === appId);
+      if (s) { s.name = name; s.api_cost = apiCost; if (!s.price || Number(req.body.overwritePrice)) s.price = apiCost; s.updated_at = now(); updated++; }
+      else { db.services.push({ id: uid('s'), name, network: 'Viettel,Mobi,Vina,VNMB,ITelecom', price: apiCost, visible: 1, description: 'Đồng bộ từ API chaycodeso3', external_app_id: appId, api_cost: apiCost, created_at: now(), updated_at: now() }); added++; }
+    });
+    saveDb(); res.json({ ok: true, added, updated, total: apps.length });
+  } catch (e) { res.status(500).json({ error: e.message || 'Không đồng bộ được app API' }); }
+});
 
 app.get('*', (req, res) => res.sendFile(path.join(root, 'public', 'index.html')));
 app.listen(PORT, () => console.log(`Có All Dịch Vụ running at http://localhost:${PORT}`));
