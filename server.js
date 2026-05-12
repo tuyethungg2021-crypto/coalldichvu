@@ -246,6 +246,12 @@ app.post('/api/admin/services', auth, adminOnly, (req, res) => {
   const s = { id: uid('s'), name: String(req.body.name || '').trim(), network: String(req.body.network || '').trim(), price: Math.floor(Number(req.body.price || 0)), visible: req.body.visible ? 1 : 0, description: String(req.body.description || ''), external_app_id: String(req.body.external_app_id || '').trim(), api_cost: Math.floor(Number(req.body.api_cost || 0)), created_at: now(), updated_at: now() };
   if (!s.name || !s.network) return res.status(400).json({ error: 'Thiếu tên dịch vụ hoặc nhà mạng' }); db.services.push(s); saveDb(); res.json(s);
 });
+app.post('/api/admin/services/hide-all', auth, adminOnly, (req, res) => {
+  db.services.forEach(s => { s.visible = 0; s.updated_at = now(); });
+  saveDb();
+  res.json({ ok: true, hidden: db.services.length });
+});
+
 app.patch('/api/admin/services/:id', auth, adminOnly, (req, res) => {
   const s = db.services.find(x => x.id === req.params.id); if (!s) return res.status(404).json({ error: 'Không tìm thấy dịch vụ' });
   ['name','network','description','external_app_id'].forEach(k => { if (req.body[k] !== undefined) s[k] = String(req.body[k]); });
