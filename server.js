@@ -14,8 +14,12 @@ const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret';
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'hungnbyt';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'azhung12';
-const MONGODB_URI = process.env.MONGODB_URI || '';
-const MONGODB_DB = process.env.MONGODB_DB || 'coalldichvu';
+const MONGODB_URI = String(process.env.MONGODB_URI || '').trim();
+const MONGODB_DB = String(process.env.MONGODB_DB || 'coalldichvu').trim();
+const CLOUDINARY_CLOUD_NAME = String(process.env.CLOUDINARY_CLOUD_NAME || '').trim();
+const CLOUDINARY_API_KEY = String(process.env.CLOUDINARY_API_KEY || '').trim();
+const CLOUDINARY_API_SECRET = String(process.env.CLOUDINARY_API_SECRET || '').trim();
+const CLOUDINARY_URL = String(process.env.CLOUDINARY_URL || '').trim();
 
 const root = __dirname;
 const dataDir = process.env.DATA_DIR || path.join(root, 'data');
@@ -24,12 +28,16 @@ const dbFile = path.join(dataDir, 'app-data.json');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
-});
-const useCloudinary = !!(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
+if (CLOUDINARY_URL) {
+  cloudinary.config({ cloudinary_url: CLOUDINARY_URL });
+} else {
+  cloudinary.config({
+    cloud_name: CLOUDINARY_CLOUD_NAME,
+    api_key: CLOUDINARY_API_KEY,
+    api_secret: CLOUDINARY_API_SECRET
+  });
+}
+const useCloudinary = !!(CLOUDINARY_URL || (CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET));
 let mongoClient = null;
 let stateCollection = null;
 let saveQueue = Promise.resolve();
@@ -123,7 +131,10 @@ function uploadToCloudinary(file, folder = 'coalldichvu') {
   }
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream({ folder, resource_type: 'image' }, (err, result) => {
-      if (err) return reject(err);
+      if (err) {
+        console.error('Cloudinary upload error:', err.message || err);
+        return reject(new Error(err.message || 'Cloudinary upload failed'));
+      }
       resolve(result.secure_url);
     });
     stream.end(file.buffer);
