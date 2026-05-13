@@ -57,7 +57,8 @@ const defaults = {
     depositInfo: 'Ngân hàng: MB Bank\nSố tài khoản: 0123456789\nChủ tài khoản: HUNG NBYT\nNội dung: nap username',
     qrImage: '',
     apiBaseUrl: 'https://chaycodeso3.com/api',
-    apiKey: '248c26ea0cd1371009db5dd443339ca1'
+    apiKey: '248c26ea0cd1371009db5dd443339ca1',
+    rentalTimeoutMinutes: '20'
   }
 };
 let db = null;
@@ -110,7 +111,7 @@ async function migrate() {
       ['Telegram', 'MobiFone', 3500, 'Thuê sim nhận OTP Telegram'],
       ['Shopee', 'Vietnamobile', 2000, 'Thuê sim nhận OTP Shopee'],
       ['Google/Gmail', 'Viettel', 4000, 'Thuê sim nhận OTP Google']
-    ].forEach(s => db.services.push({ id: uid('s'), name: s[0], network: s[1], price: s[2], visible: 1, description: s[3], created_at: now(), updated_at: now() }));
+    ].forEach(s => db.services.push({ id: uid('s'), name: s[0], network: s[1], price: s[2], visible: 1, description: s[3], imageUrl: '', created_at: now(), updated_at: now() }));
     changed = true;
   }
   if (changed) saveDb();
@@ -169,6 +170,39 @@ async function simApi(params) {
   try { data = JSON.parse(text); } catch { throw new Error('API trả về không phải JSON: ' + text.slice(0, 120)); }
   return data;
 }
+
+function rentalTimeoutMs() {
+  const min = Math.max(1, Number(db?.settings?.rentalTimeoutMinutes || process.env.RENTAL_TIMEOUT_MINUTES || 20));
+  return min * 60 * 1000;
+}
+function isWaitingRental(r) {
+  const st = String(r.status || '').toLowerCase();
+  return !r.otp_code && !r.refunded && !r.ended_at && (st.includes('chờ') || st.includes('đang thuê') || st.includes('waiting'));
+}
+function refundRental(r, reason = 'Hết thời gian chờ OTP, đã tự hoàn tiền') {
+  if (!r || r.refunded || r.otp_code) return false;
+  const owner = db.users.find(u => u.id === r.user_id);
+  if (owner) owner.balance = Math.floor(Number(owner.balance || 0) + Number(r.price || 0));
+  r.refunded = 1;
+  r.status = 'Không nhận được code';
+  r.ended_at = now();
+  r.note = reason;
+  return true;
+}
+function sweepExpiredRentals() {
+  if (!db || !Array.isArray(db.rentals)) return 0;
+  const timeout = rentalTimeoutMs();
+  let changed = 0;
+  for (const r of db.rentals) {
+    const started = new Date(r.rented_at || 0).getTime();
+    if (isWaitingRental(r) && started && Date.now() - started >= timeout) {
+      if (refundRental(r)) changed++;
+    }
+  }
+  if (changed) saveDb();
+  return changed;
+}
+
 function safeSettingsForUser(settings, isAdmin) {
   const out = { ...settings };
   if (!isAdmin) delete out.apiKey;
@@ -235,7 +269,7 @@ app.post('/api/rentals', auth, async (req, res) => {
     res.json({ rental, user: cleanUser(req.user), api: apiResult });
   } catch (e) { res.status(500).json({ error: e.message || 'Không gọi được API thuê sim' }); }
 });
-app.get('/api/rentals', auth, (req, res) => res.json(db.rentals.filter(r => r.user_id === req.user.id).sort((a,b) => b.rented_at.localeCompare(a.rented_at))));
+app.get('/api/rentals', auth, (req, res) => { sweepExpiredRentals(); res.json(db.rentals.filter(r => r.user_id === req.user.id).sort((a,b) => b.rented_at.localeCompare(a.rented_at))); });
 
 app.post('/api/rentals/:id/check-code', auth, async (req, res) => {
   try {
@@ -246,13 +280,12 @@ app.post('/api/rentals/:id/check-code', auth, async (req, res) => {
     if (Number(apiResult.ResponseCode) === 0) {
       const result = apiResult.Result || {};
       r.status = 'Đã nhận code'; r.otp_code = String(result.Code || ''); r.sms = String(result.SMS || ''); r.ended_at = now();
-    } else if (Number(apiResult.ResponseCode) === 2) { r.status = 'Không nhận được code'; r.ended_at = now();
-      if (!r.refunded && !r.otp_code) {
-        const owner = db.users.find(u => u.id === r.user_id);
-        if (owner) owner.balance = Math.floor(Number(owner.balance || 0) + Number(r.price || 0));
-        r.refunded = 1;
-        r.note = 'Hết hạn chờ OTP, đã tự hoàn tiền';
-      } }
+    } else if (Number(apiResult.ResponseCode) === 2) {
+      refundRental(r, 'Hết thời gian chờ OTP, đã tự hoàn tiền');
+    } else if (isWaitingRental(r)) {
+      const started = new Date(r.rented_at || 0).getTime();
+      if (started && Date.now() - started >= rentalTimeoutMs()) refundRental(r);
+    }
     if (!(Number(apiResult.ResponseCode) === 2 && r.refunded)) r.note = apiResult.Msg || r.note || '';
     saveDb();
     res.json({ rental: r, api: apiResult, user: cleanUser(req.user) });
@@ -307,7 +340,7 @@ app.delete('/api/admin/users/:id', auth, adminOnly, (req, res) => {
 });
 
 app.post('/api/admin/services', auth, adminOnly, (req, res) => {
-  const s = { id: uid('s'), name: String(req.body.name || '').trim(), network: String(req.body.network || '').trim(), price: Math.floor(Number(req.body.price || 0)), visible: req.body.visible ? 1 : 0, description: String(req.body.description || ''), external_app_id: String(req.body.external_app_id || '').trim(), api_cost: Math.floor(Number(req.body.api_cost || 0)), created_at: now(), updated_at: now() };
+  const s = { id: uid('s'), name: String(req.body.name || '').trim(), network: String(req.body.network || '').trim(), price: Math.floor(Number(req.body.price || 0)), visible: req.body.visible ? 1 : 0, description: String(req.body.description || ''), imageUrl: String(req.body.imageUrl || req.body.image_url || ''), external_app_id: String(req.body.external_app_id || '').trim(), api_cost: Math.floor(Number(req.body.api_cost || 0)), created_at: now(), updated_at: now() };
   if (!s.name || !s.network) return res.status(400).json({ error: 'Thiếu tên dịch vụ hoặc nhà mạng' }); db.services.push(s); saveDb(); res.json(s);
 });
 app.post('/api/admin/services/hide-all', auth, adminOnly, (req, res) => {
@@ -318,7 +351,7 @@ app.post('/api/admin/services/hide-all', auth, adminOnly, (req, res) => {
 
 app.patch('/api/admin/services/:id', auth, adminOnly, (req, res) => {
   const s = db.services.find(x => x.id === req.params.id); if (!s) return res.status(404).json({ error: 'Không tìm thấy dịch vụ' });
-  ['name','network','description','external_app_id'].forEach(k => { if (req.body[k] !== undefined) s[k] = String(req.body[k]); });
+  ['name','network','description','external_app_id','imageUrl'].forEach(k => { if (req.body[k] !== undefined) s[k] = String(req.body[k]); });
   if (req.body.price !== undefined) s.price = Math.floor(Number(req.body.price || 0));
   if (req.body.visible !== undefined) s.visible = req.body.visible ? 1 : 0;
   if (req.body.api_cost !== undefined) s.api_cost = Math.floor(Number(req.body.api_cost || 0));
@@ -326,7 +359,7 @@ app.patch('/api/admin/services/:id', auth, adminOnly, (req, res) => {
 });
 app.delete('/api/admin/services/:id', auth, adminOnly, (req, res) => { db.services = db.services.filter(s => s.id !== req.params.id); saveDb(); res.json({ ok: true }); });
 
-app.get('/api/admin/rentals', auth, adminOnly, (req, res) => res.json(db.rentals.map(r => ({ ...r, username: (db.users.find(u => u.id === r.user_id) || {}).username || 'unknown' })).sort((a,b) => b.rented_at.localeCompare(a.rented_at))));
+app.get('/api/admin/rentals', auth, adminOnly, (req, res) => { sweepExpiredRentals(); res.json(db.rentals.map(r => ({ ...r, username: (db.users.find(u => u.id === r.user_id) || {}).username || 'unknown' })).sort((a,b) => b.rented_at.localeCompare(a.rented_at))); });
 app.patch('/api/admin/rentals/:id', auth, adminOnly, (req, res) => {
   const r = db.rentals.find(x => x.id === req.params.id); if (!r) return res.status(404).json({ error: 'Không tìm thấy lượt thuê' });
   ['status','otp_code','note','ended_at'].forEach(k => { if (req.body[k] !== undefined) r[k] = String(req.body[k]); }); saveDb(); res.json(r);
@@ -340,7 +373,7 @@ app.patch('/api/admin/deposits/:id', auth, adminOnly, (req, res) => {
 });
 app.get('/api/admin/notifications', auth, adminOnly, (req, res) => res.json(db.notifications.sort((a,b) => b.created_at.localeCompare(a.created_at)).slice(0,100)));
 app.patch('/api/admin/notifications/read', auth, adminOnly, (req, res) => { db.notifications.forEach(n => n.read = 1); saveDb(); res.json({ ok: true }); });
-app.patch('/api/admin/settings', auth, adminOnly, (req, res) => { ['siteName','brandText','logoUrl','adUrl','themeColor','layoutMode','depositInfo','qrImage','apiBaseUrl','apiKey'].forEach(k => { if (req.body[k] !== undefined) db.settings[k] = String(req.body[k]); }); saveDb(); res.json(safeSettingsForUser(db.settings, true)); });
+app.patch('/api/admin/settings', auth, adminOnly, (req, res) => { ['siteName','brandText','logoUrl','adUrl','themeColor','layoutMode','depositInfo','qrImage','apiBaseUrl','apiKey','rentalTimeoutMinutes'].forEach(k => { if (req.body[k] !== undefined) db.settings[k] = String(req.body[k]); }); saveDb(); res.json(safeSettingsForUser(db.settings, true)); });
 app.get('/api/admin/sim-api/account', auth, adminOnly, async (req, res) => {
   try { res.json(await simApi({ act: 'account' })); } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -359,7 +392,7 @@ app.post('/api/admin/sim-api/sync-apps', auth, adminOnly, async (req, res) => {
       const apiCost = Math.floor(Number(a.Cost || 0));
       let s = db.services.find(x => String(x.external_app_id || '') === appId);
       if (s) { s.name = name; s.api_cost = apiCost; if (!s.price || Number(req.body.overwritePrice)) s.price = apiCost; s.updated_at = now(); updated++; }
-      else { db.services.push({ id: uid('s'), name, network: 'Viettel,Mobi,Vina,VNMB,ITelecom', price: apiCost, visible: 0, description: '', external_app_id: appId, api_cost: apiCost, created_at: now(), updated_at: now() }); added++; }
+      else { db.services.push({ id: uid('s'), name, network: 'Viettel,Mobi,Vina,VNMB,ITelecom', price: apiCost, visible: 0, description: '', imageUrl: '', external_app_id: appId, api_cost: apiCost, created_at: now(), updated_at: now() }); added++; }
     });
     saveDb(); res.json({ ok: true, added, updated, total: apps.length });
   } catch (e) { res.status(500).json({ error: e.message || 'Không đồng bộ được app API' }); }
