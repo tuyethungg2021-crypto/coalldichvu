@@ -56,9 +56,10 @@ const defaults = {
     logoUrl: '', adUrl: '', themeColor: '#2563eb', layoutMode: 'modern',
     depositInfo: 'Ngân hàng: MB Bank\nSố tài khoản: 0123456789\nChủ tài khoản: HUNG NBYT\nNội dung: nap username',
     qrImage: '',
-    apiBaseUrl: 'https://chaycodeso3.com/api',
-    apiKey: '248c26ea0cd1371009db5dd443339ca1',
-    rentalTimeoutMinutes: '20'
+    apiBaseUrl: 'https://apisim.codesim.net',
+    apiProvider: 'codesim',
+    apiKey: 'eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJudWJpYTMiLCJqdGkiOiI4NDM1NiIsImlhdCI6MTc3NzA4NDE5NiwiZXhwIjoxODM5MjkyMTk2fQ.F5SrJi-hvbhovlmaoxHyIcqshXwbnapb-nltkXkPQO2WLTG8kr5VRPHZdu8ZYdrzmi8m6pTbUZtMo1dSsI6cvA',
+    otpTimeoutMinutes: '20'
   }
 };
 let db = null;
@@ -111,7 +112,7 @@ async function migrate() {
       ['Telegram', 'MobiFone', 3500, 'Thuê sim nhận OTP Telegram'],
       ['Shopee', 'Vietnamobile', 2000, 'Thuê sim nhận OTP Shopee'],
       ['Google/Gmail', 'Viettel', 4000, 'Thuê sim nhận OTP Google']
-    ].forEach(s => db.services.push({ id: uid('s'), name: s[0], network: s[1], price: s[2], visible: 1, description: s[3], imageUrl: '', created_at: now(), updated_at: now() }));
+    ].forEach(s => db.services.push({ id: uid('s'), name: s[0], network: s[1], price: s[2], visible: 0, description: s[3], imageUrl: '', created_at: now(), updated_at: now() }));
     changed = true;
   }
   if (changed) saveDb();
@@ -156,53 +157,83 @@ function auth(req, res, next) {
 }
 function adminOnly(req, res, next) { if (req.user.role !== 'admin') return res.status(403).json({ error: 'Chỉ admin được dùng chức năng này' }); next(); }
 function getApiKey() { return String(db.settings.apiKey || process.env.SIM_API_KEY || '').trim(); }
-function getApiBase() { return String(db.settings.apiBaseUrl || 'https://chaycodeso3.com/api').trim(); }
-async function simApi(params) {
-  const key = getApiKey();
-  if (!key) throw new Error('Admin chưa cài API key');
-  const url = new URL(getApiBase());
-  Object.entries({ ...params, apik: key }).forEach(([k, v]) => {
+function getApiBase() { return String(db.settings.apiBaseUrl || 'https://apisim.codesim.net').trim().replace(/\/+$/, ''); }
+function getApiProvider() { return String(db.settings.apiProvider || 'codesim').trim().toLowerCase(); }
+function getOtpTimeoutMinutes() {
+  const n = Number(db.settings.otpTimeoutMinutes || 20);
+  return Number.isFinite(n) && n > 0 ? n : 20;
+}
+function buildUrl(pathname, params = {}) {
+  const url = new URL(getApiBase() + pathname);
+  Object.entries(params).forEach(([k, v]) => {
     if (v !== undefined && v !== null && String(v) !== '') url.searchParams.set(k, String(v));
   });
+  return url;
+}
+async function fetchJson(url) {
   const r = await fetch(url.toString(), { method: 'GET' });
   const text = await r.text();
   let data;
-  try { data = JSON.parse(text); } catch { throw new Error('API trả về không phải JSON: ' + text.slice(0, 120)); }
+  try { data = JSON.parse(text); } catch { throw new Error('API trả về không phải JSON: ' + text.slice(0, 160)); }
+  if (!r.ok) throw new Error(data.message || data.Msg || ('API lỗi HTTP ' + r.status));
   return data;
 }
-
-function rentalTimeoutMs() {
-  const min = Math.max(1, Number(db?.settings?.rentalTimeoutMinutes || process.env.RENTAL_TIMEOUT_MINUTES || 20));
-  return min * 60 * 1000;
+function isCodesimOk(data) { return Number(data.status) === 200; }
+async function simApi(action, params = {}) {
+  const key = getApiKey();
+  if (!key) throw new Error('Admin chưa cài API key');
+  if (getApiProvider() === 'codesim' || getApiBase().includes('apisim.codesim.net')) {
+    if (action === 'account') return fetchJson(buildUrl('/yourself/information-by-api-key', { api_key: key }));
+    if (action === 'services') return fetchJson(buildUrl('/service/get_service_by_api_key', { api_key: key }));
+    if (action === 'networks') return fetchJson(buildUrl('/network/get-network-by-api-key', { api_key: key }));
+    if (action === 'rent') return fetchJson(buildUrl('/sim/get_sim', { api_key: key, service_id: params.service_id, network_id: params.network_id, phone: params.phone }));
+    if (action === 'code') return fetchJson(buildUrl('/otp/get_otp_by_phone_api_key', { api_key: key, otp_id: params.otp_id }));
+    if (action === 'cancel') return fetchJson(buildUrl('/sim/cancel_api_key/' + encodeURIComponent(params.sim_id || ''), { api_key: key }));
+    if (action === 'reuse') return fetchJson(buildUrl('/sim/reuse_by_phone_api_key', { api_key: key, phone: params.phone, service_id: params.service_id }));
+  }
+  // Legacy chaycodeso3 adapter
+  const url = new URL(getApiBase());
+  Object.entries({ ...params, act: action, apik: key }).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && String(v) !== '') url.searchParams.set(k, String(v));
+  });
+  return fetchJson(url);
 }
-function isWaitingRental(r) {
-  const st = String(r.status || '').toLowerCase();
-  return !r.otp_code && !r.refunded && !r.ended_at && (st.includes('chờ') || st.includes('đang thuê') || st.includes('waiting'));
+async function cancelExternalRental(r) {
+  if (r.cancelled_external || !r.external_sim_id) return null;
+  try {
+    const out = await simApi('cancel', { sim_id: r.external_sim_id });
+    r.cancelled_external = 1;
+    return out;
+  } catch (e) {
+    r.note = (r.note ? r.note + ' | ' : '') + 'Không hủy được sim API: ' + e.message;
+    return null;
+  }
 }
-function refundRental(r, reason = 'Hết thời gian chờ OTP, đã tự hoàn tiền') {
-  if (!r || r.refunded || r.otp_code) return false;
+async function refundRental(r, reason = 'Hết thời gian chờ OTP, đã tự hoàn tiền') {
+  if (!r || r.refunded || r.otp_code || r.status === 'Đã nhận code') return false;
   const owner = db.users.find(u => u.id === r.user_id);
   if (owner) owner.balance = Math.floor(Number(owner.balance || 0) + Number(r.price || 0));
   r.refunded = 1;
   r.status = 'Không nhận được code';
-  r.ended_at = now();
+  r.ended_at = r.ended_at || now();
   r.note = reason;
+  await cancelExternalRental(r);
   return true;
 }
-function sweepExpiredRentals() {
-  if (!db || !Array.isArray(db.rentals)) return 0;
-  const timeout = rentalTimeoutMs();
-  let changed = 0;
-  for (const r of db.rentals) {
-    const started = new Date(r.rented_at || 0).getTime();
-    if (isWaitingRental(r) && started && Date.now() - started >= timeout) {
-      if (refundRental(r)) changed++;
+async function processExpiredRentals() {
+  const timeoutMs = getOtpTimeoutMinutes() * 60 * 1000;
+  let changed = false;
+  for (const r of db.rentals || []) {
+    const waiting = !r.otp_code && !r.refunded && !r.ended_at && String(r.status || '').toLowerCase().includes('chờ');
+    if (!waiting) continue;
+    const t = new Date(r.rented_at || r.created_at || now()).getTime();
+    if (Date.now() - t >= timeoutMs) {
+      await refundRental(r);
+      changed = true;
     }
   }
   if (changed) saveDb();
-  return changed;
 }
-
 function safeSettingsForUser(settings, isAdmin) {
   const out = { ...settings };
   if (!isAdmin) delete out.apiKey;
@@ -254,39 +285,42 @@ app.post('/api/rentals', auth, async (req, res) => {
   try {
     const service = db.services.find(s => s.id === req.body.service_id && Number(s.visible) === 1);
     if (!service) return res.status(404).json({ error: 'Dịch vụ không tồn tại hoặc đang ẩn' });
-    if (!service.external_app_id) return res.status(400).json({ error: 'Dịch vụ này chưa gắn App ID API. Admin hãy đồng bộ API hoặc nhập App ID.' });
+    if (!service.external_app_id) return res.status(400).json({ error: 'Dịch vụ này chưa gắn Service ID API. Admin hãy đồng bộ API hoặc nhập Service ID.' });
     if ((req.user.balance || 0) < service.price) return res.status(400).json({ error: 'Số dư web không đủ, vui lòng nạp thêm tiền' });
-    const carrier = String(req.body.carrier || service.network || '').trim();
-    const apiResult = await simApi({ act: 'number', appId: service.external_app_id, carrier });
-    if (Number(apiResult.ResponseCode) !== 0) return res.status(400).json({ error: apiResult.Msg || 'API không cấp được số' });
-    const result = apiResult.Result || {};
-    const cost = Math.floor(Number(result.Cost || service.price || 0));
+    const networkId = String(req.body.carrier || '').trim();
+    const apiResult = await simApi('rent', { service_id: service.external_app_id, network_id: networkId });
+    if (!isCodesimOk(apiResult)) return res.status(400).json({ error: apiResult.message || 'API không cấp được số', api: apiResult });
+    const result = apiResult.data || {};
+    if (!result.phone || !result.otpId) return res.status(400).json({ error: apiResult.message || 'API không trả về số sim/OTP ID', api: apiResult });
+    const cost = Math.floor(Number(result.payment || service.price || 0));
     req.user.balance = Math.floor(Number(req.user.balance || 0) - Number(service.price || cost));
-    const number = String(result.Number || '');
-    const displayNumber = number.startsWith('0') ? number : '0' + number;
-    const rental = { id: uid('r'), user_id: req.user.id, service_id: service.id, service_name: service.name, network: carrier, phone_number: displayNumber, price: service.price, api_cost: cost, external_id: String(result.Id || ''), api_app_id: String(service.external_app_id), status: 'Đang chờ code', rented_at: now(), ended_at: '', otp_code: '', sms: '', note: apiResult.Msg || '' };
+    const displayNumber = String(result.phone || '');
+    const rental = {
+      id: uid('r'), user_id: req.user.id, service_id: service.id, service_name: service.name,
+      network: networkId || service.network || '', phone_number: displayNumber, price: service.price, api_cost: cost,
+      external_id: String(result.otpId || ''), external_sim_id: String(result.simId || ''), api_app_id: String(service.external_app_id),
+      status: 'Đang chờ code', rented_at: now(), ended_at: '', otp_code: '', sms: '', note: apiResult.message || ''
+    };
     db.rentals.push(rental); saveDb();
     res.json({ rental, user: cleanUser(req.user), api: apiResult });
   } catch (e) { res.status(500).json({ error: e.message || 'Không gọi được API thuê sim' }); }
 });
-app.get('/api/rentals', auth, (req, res) => { sweepExpiredRentals(); res.json(db.rentals.filter(r => r.user_id === req.user.id).sort((a,b) => b.rented_at.localeCompare(a.rented_at))); });
+app.get('/api/rentals', auth, async (req, res) => { await processExpiredRentals(); res.json(db.rentals.filter(r => r.user_id === req.user.id).sort((a,b) => b.rented_at.localeCompare(a.rented_at))); });
 
 app.post('/api/rentals/:id/check-code', auth, async (req, res) => {
   try {
+    await processExpiredRentals();
     const r = db.rentals.find(x => x.id === req.params.id && (x.user_id === req.user.id || req.user.role === 'admin'));
     if (!r) return res.status(404).json({ error: 'Không tìm thấy lượt thuê' });
-    if (!r.external_id) return res.status(400).json({ error: 'Lượt thuê này không có ID API' });
-    const apiResult = await simApi({ act: 'code', id: r.external_id });
-    if (Number(apiResult.ResponseCode) === 0) {
-      const result = apiResult.Result || {};
-      r.status = 'Đã nhận code'; r.otp_code = String(result.Code || ''); r.sms = String(result.SMS || ''); r.ended_at = now();
-    } else if (Number(apiResult.ResponseCode) === 2) {
-      refundRental(r, 'Hết thời gian chờ OTP, đã tự hoàn tiền');
-    } else if (isWaitingRental(r)) {
-      const started = new Date(r.rented_at || 0).getTime();
-      if (started && Date.now() - started >= rentalTimeoutMs()) refundRental(r);
+    if (r.refunded) return res.json({ rental: r, api: { message: r.note || 'Đã tự hoàn tiền' }, user: cleanUser(req.user) });
+    if (!r.external_id) return res.status(400).json({ error: 'Lượt thuê này không có OTP ID API' });
+    const apiResult = await simApi('code', { otp_id: r.external_id });
+    if (isCodesimOk(apiResult) && apiResult.data && apiResult.data.code) {
+      const result = apiResult.data || {};
+      r.status = 'Đã nhận code'; r.otp_code = String(result.code || ''); r.sms = String(result.content || ''); r.ended_at = now(); r.note = apiResult.message || '';
+    } else {
+      r.note = apiResult.message || 'Chưa có OTP, vui lòng thử lại sau ít nhất 4 giây';
     }
-    if (!(Number(apiResult.ResponseCode) === 2 && r.refunded)) r.note = apiResult.Msg || r.note || '';
     saveDb();
     res.json({ rental: r, api: apiResult, user: cleanUser(req.user) });
   } catch (e) { res.status(500).json({ error: e.message || 'Không lấy được code' }); }
@@ -295,14 +329,15 @@ app.post('/api/rentals/:id/cancel', auth, async (req, res) => {
   try {
     const r = db.rentals.find(x => x.id === req.params.id && (x.user_id === req.user.id || req.user.role === 'admin'));
     if (!r) return res.status(404).json({ error: 'Không tìm thấy lượt thuê' });
-    if (req.user.role !== 'admin') return res.status(403).json({ error: 'User không được hủy sim đã thuê. Hệ thống sẽ tự hoàn tiền nếu hết hạn chờ OTP mà chưa nhận được OTP.' });
-    if (!r.external_id) return res.status(400).json({ error: 'Lượt thuê này không có ID API' });
-    const apiResult = await simApi({ act: 'expired', id: r.external_id });
-    if (Number(apiResult.ResponseCode) === 0 || Number(apiResult.ResponseCode) === 2) { r.status = 'Đã hủy'; r.ended_at = now(); }
-    r.note = apiResult.Msg || r.note || ''; saveDb();
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'User không được hủy sim đang thuê. Hệ thống sẽ tự hoàn tiền nếu hết thời gian chờ OTP mà chưa nhận được OTP.' });
+    if (!r.external_sim_id) return res.status(400).json({ error: 'Lượt thuê này không có Sim ID API' });
+    const apiResult = await simApi('cancel', { sim_id: r.external_sim_id });
+    if (isCodesimOk(apiResult)) { r.status = 'Đã hủy'; r.ended_at = now(); r.cancelled_external = 1; }
+    r.note = apiResult.message || r.note || ''; saveDb();
     res.json({ rental: r, api: apiResult });
   } catch (e) { res.status(500).json({ error: e.message || 'Không hủy được lượt thuê' }); }
 });
+
 
 
 app.post('/api/deposits', auth, upload.single('proof'), async (req, res) => {
@@ -340,8 +375,8 @@ app.delete('/api/admin/users/:id', auth, adminOnly, (req, res) => {
 });
 
 app.post('/api/admin/services', auth, adminOnly, (req, res) => {
-  const s = { id: uid('s'), name: String(req.body.name || '').trim(), network: String(req.body.network || '').trim(), price: Math.floor(Number(req.body.price || 0)), visible: req.body.visible ? 1 : 0, description: String(req.body.description || ''), imageUrl: String(req.body.imageUrl || req.body.image_url || ''), external_app_id: String(req.body.external_app_id || '').trim(), api_cost: Math.floor(Number(req.body.api_cost || 0)), created_at: now(), updated_at: now() };
-  if (!s.name || !s.network) return res.status(400).json({ error: 'Thiếu tên dịch vụ hoặc nhà mạng' }); db.services.push(s); saveDb(); res.json(s);
+  const s = { id: uid('s'), name: String(req.body.name || '').trim(), network: String(req.body.network || '').trim(), price: Math.floor(Number(req.body.price || 0)), visible: req.body.visible ? 1 : 0, description: String(req.body.description || ''), imageUrl: String(req.body.imageUrl || ''), external_app_id: String(req.body.external_app_id || '').trim(), api_cost: Math.floor(Number(req.body.api_cost || 0)), created_at: now(), updated_at: now() };
+  if (!s.name) return res.status(400).json({ error: 'Thiếu tên dịch vụ' }); db.services.push(s); saveDb(); res.json(s);
 });
 app.post('/api/admin/services/hide-all', auth, adminOnly, (req, res) => {
   db.services.forEach(s => { s.visible = 0; s.updated_at = now(); });
@@ -359,7 +394,7 @@ app.patch('/api/admin/services/:id', auth, adminOnly, (req, res) => {
 });
 app.delete('/api/admin/services/:id', auth, adminOnly, (req, res) => { db.services = db.services.filter(s => s.id !== req.params.id); saveDb(); res.json({ ok: true }); });
 
-app.get('/api/admin/rentals', auth, adminOnly, (req, res) => { sweepExpiredRentals(); res.json(db.rentals.map(r => ({ ...r, username: (db.users.find(u => u.id === r.user_id) || {}).username || 'unknown' })).sort((a,b) => b.rented_at.localeCompare(a.rented_at))); });
+app.get('/api/admin/rentals', auth, adminOnly, async (req, res) => { await processExpiredRentals(); res.json(db.rentals.map(r => ({ ...r, username: (db.users.find(u => u.id === r.user_id) || {}).username || 'unknown' })).sort((a,b) => b.rented_at.localeCompare(a.rented_at))); });
 app.patch('/api/admin/rentals/:id', auth, adminOnly, (req, res) => {
   const r = db.rentals.find(x => x.id === req.params.id); if (!r) return res.status(404).json({ error: 'Không tìm thấy lượt thuê' });
   ['status','otp_code','note','ended_at'].forEach(k => { if (req.body[k] !== undefined) r[k] = String(req.body[k]); }); saveDb(); res.json(r);
@@ -373,26 +408,26 @@ app.patch('/api/admin/deposits/:id', auth, adminOnly, (req, res) => {
 });
 app.get('/api/admin/notifications', auth, adminOnly, (req, res) => res.json(db.notifications.sort((a,b) => b.created_at.localeCompare(a.created_at)).slice(0,100)));
 app.patch('/api/admin/notifications/read', auth, adminOnly, (req, res) => { db.notifications.forEach(n => n.read = 1); saveDb(); res.json({ ok: true }); });
-app.patch('/api/admin/settings', auth, adminOnly, (req, res) => { ['siteName','brandText','logoUrl','adUrl','themeColor','layoutMode','depositInfo','qrImage','apiBaseUrl','apiKey','rentalTimeoutMinutes'].forEach(k => { if (req.body[k] !== undefined) db.settings[k] = String(req.body[k]); }); saveDb(); res.json(safeSettingsForUser(db.settings, true)); });
+app.patch('/api/admin/settings', auth, adminOnly, (req, res) => { ['siteName','brandText','logoUrl','adUrl','themeColor','layoutMode','depositInfo','qrImage','apiBaseUrl','apiKey','apiProvider','otpTimeoutMinutes'].forEach(k => { if (req.body[k] !== undefined) db.settings[k] = String(req.body[k]); }); saveDb(); res.json(safeSettingsForUser(db.settings, true)); });
 app.get('/api/admin/sim-api/account', auth, adminOnly, async (req, res) => {
-  try { res.json(await simApi({ act: 'account' })); } catch (e) { res.status(500).json({ error: e.message }); }
+  try { res.json(await simApi('account')); } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.get('/api/admin/sim-api/apps', auth, adminOnly, async (req, res) => {
-  try { res.json(await simApi({ act: 'app' })); } catch (e) { res.status(500).json({ error: e.message }); }
+  try { res.json(await simApi('services')); } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/admin/sim-api/sync-apps', auth, adminOnly, async (req, res) => {
   try {
-    const data = await simApi({ act: 'app' });
-    if (Number(data.ResponseCode) !== 0) return res.status(400).json({ error: data.Msg || 'API không trả danh sách app', api: data });
-    const apps = Array.isArray(data.Result) ? data.Result : [];
+    const data = await simApi('services');
+    if (!isCodesimOk(data)) return res.status(400).json({ error: data.message || 'API không trả danh sách dịch vụ', api: data });
+    const apps = Array.isArray(data.data) ? data.data : [];
     let added = 0, updated = 0;
     apps.forEach(a => {
-      const appId = String(a.Id || '').trim(); if (!appId) return;
-      const name = String(a.Name || ('App ' + appId));
-      const apiCost = Math.floor(Number(a.Cost || 0));
+      const appId = String(a.id || a.Id || '').trim(); if (!appId) return;
+      const name = String(a.name || a.Name || ('Service ' + appId));
+      const apiCost = Math.floor(Number(a.price || a.Cost || 0));
       let s = db.services.find(x => String(x.external_app_id || '') === appId);
       if (s) { s.name = name; s.api_cost = apiCost; if (!s.price || Number(req.body.overwritePrice)) s.price = apiCost; s.updated_at = now(); updated++; }
-      else { db.services.push({ id: uid('s'), name, network: 'Viettel,Mobi,Vina,VNMB,ITelecom', price: apiCost, visible: 0, description: '', imageUrl: '', external_app_id: appId, api_cost: apiCost, created_at: now(), updated_at: now() }); added++; }
+      else { db.services.push({ id: uid('s'), name, network: '', price: apiCost, visible: 0, description: '', imageUrl: '', external_app_id: appId, api_cost: apiCost, created_at: now(), updated_at: now() }); added++; }
     });
     saveDb(); res.json({ ok: true, added, updated, total: apps.length });
   } catch (e) { res.status(500).json({ error: e.message || 'Không đồng bộ được app API' }); }
