@@ -56,9 +56,13 @@ const defaults = {
     logoUrl: '', adUrl: '', themeColor: '#2563eb', layoutMode: 'modern',
     depositInfo: 'Ngân hàng: MB Bank\nSố tài khoản: 0123456789\nChủ tài khoản: HUNG NBYT\nNội dung: nap username',
     qrImage: '',
-    apiBaseUrl: 'https://apisim.codesim.net',
-    apiProvider: 'codesim',
-    apiKey: 'eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJudWJpYTMiLCJqdGkiOiI4NDM1NiIsImlhdCI6MTc3NzA4NDE5NiwiZXhwIjoxODM5MjkyMTk2fQ.F5SrJi-hvbhovlmaoxHyIcqshXwbnapb-nltkXkPQO2WLTG8kr5VRPHZdu8ZYdrzmi8m6pTbUZtMo1dSsI6cvA',
+    legacyApiBaseUrl: 'https://chaycodeso3.com/api',
+    legacyApiKey: '248c26ea0cd1371009db5dd443339ca1',
+    codesimApiBaseUrl: 'https://apisim.codesim.net',
+    codesimApiKey: 'eyJhbGciOiJIUzUxMiJ9.eyJzdWIiOiJudWJpYTMiLCJqdGkiOiI4NDM1NiIsImlhdCI6MTc3NzA4NDE5NiwiZXhwIjoxODM5MjkyMTk2fQ.F5SrJi-hvbhovlmaoxHyIcqshXwbnapb-nltkXkPQO2WLTG8kr5VRPHZdu8ZYdrzmi8m6pTbUZtMo1dSsI6cvA',
+    apiBaseUrl: 'https://chaycodeso3.com/api',
+    apiProvider: 'legacy',
+    apiKey: '248c26ea0cd1371009db5dd443339ca1',
     otpTimeoutMinutes: '20'
   }
 };
@@ -156,15 +160,25 @@ function auth(req, res, next) {
   } catch { res.status(401).json({ error: 'Phiên đăng nhập hết hạn' }); }
 }
 function adminOnly(req, res, next) { if (req.user.role !== 'admin') return res.status(403).json({ error: 'Chỉ admin được dùng chức năng này' }); next(); }
-function getApiKey() { return String(db.settings.apiKey || process.env.SIM_API_KEY || '').trim(); }
-function getApiBase() { return String(db.settings.apiBaseUrl || 'https://apisim.codesim.net').trim().replace(/\/+$/, ''); }
-function getApiProvider() { return String(db.settings.apiProvider || 'codesim').trim().toLowerCase(); }
+function providerCfg(provider) {
+  provider = String(provider || 'legacy').toLowerCase();
+  if (provider === 'codesim') return {
+    provider: 'codesim',
+    base: String(db.settings.codesimApiBaseUrl || 'https://apisim.codesim.net').trim().replace(/\/+$/, ''),
+    key: String(db.settings.codesimApiKey || process.env.CODESIM_API_KEY || '').trim()
+  };
+  return {
+    provider: 'legacy',
+    base: String(db.settings.legacyApiBaseUrl || db.settings.apiBaseUrl || 'https://chaycodeso3.com/api').trim().replace(/\/+$/, ''),
+    key: String(db.settings.legacyApiKey || db.settings.apiKey || process.env.SIM_API_KEY || '').trim()
+  };
+}
 function getOtpTimeoutMinutes() {
   const n = Number(db.settings.otpTimeoutMinutes || 20);
   return Number.isFinite(n) && n > 0 ? n : 20;
 }
-function buildUrl(pathname, params = {}) {
-  const url = new URL(getApiBase() + pathname);
+function buildUrlWithBase(base, pathname, params = {}) {
+  const url = new URL(base + pathname);
   Object.entries(params).forEach(([k, v]) => {
     if (v !== undefined && v !== null && String(v) !== '') url.searchParams.set(k, String(v));
   });
@@ -174,7 +188,7 @@ async function fetchJson(url) {
   const r = await fetch(url.toString(), {
     method: 'GET',
     headers: {
-      'User-Agent': 'Mozilla/5.0',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36',
       'Accept': 'application/json,text/plain,*/*'
     }
   });
@@ -184,30 +198,40 @@ async function fetchJson(url) {
   if (!r.ok) throw new Error(data.message || data.Msg || ('API lỗi HTTP ' + r.status));
   return data;
 }
-function isCodesimOk(data) { return Number(data.status) === 200; }
-async function simApi(action, params = {}) {
-  const key = getApiKey();
-  if (!key) throw new Error('Admin chưa cài API key');
-  if (getApiProvider() === 'codesim' || getApiBase().includes('apisim.codesim.net')) {
-    if (action === 'account') return fetchJson(buildUrl('/yourself/information-by-api-key', { api_key: key }));
-    if (action === 'services') return fetchJson(buildUrl('/service/get_service_by_api_key', { api_key: key }));
-    if (action === 'networks') return fetchJson(buildUrl('/network/get-network-by-api-key', { api_key: key }));
-    if (action === 'rent') return fetchJson(buildUrl('/sim/get_sim', { api_key: key, service_id: params.service_id, network_id: params.network_id, phone: params.phone }));
-    if (action === 'code') return fetchJson(buildUrl('/otp/get_otp_by_phone_api_key', { api_key: key, otp_id: params.otp_id }));
-    if (action === 'cancel') return fetchJson(buildUrl('/sim/cancel_api_key/' + encodeURIComponent(params.sim_id || ''), { api_key: key }));
-    if (action === 'reuse') return fetchJson(buildUrl('/sim/reuse_by_phone_api_key', { api_key: key, phone: params.phone, service_id: params.service_id }));
+function isProviderOk(provider, data) {
+  return provider === 'codesim' ? Number(data.status) === 200 : Number(data.ResponseCode) === 0;
+}
+async function simApi(provider, action, params = {}) {
+  const cfg = providerCfg(provider);
+  if (!cfg.key) throw new Error('Admin chưa cài API key cho ' + cfg.provider);
+  if (cfg.provider === 'codesim') {
+    if (action === 'account') return fetchJson(buildUrlWithBase(cfg.base, '/yourself/information-by-api-key', { api_key: cfg.key }));
+    if (action === 'services') return fetchJson(buildUrlWithBase(cfg.base, '/service/get_service_by_api_key', { api_key: cfg.key }));
+    if (action === 'networks') return fetchJson(buildUrlWithBase(cfg.base, '/network/get-network-by-api-key', { api_key: cfg.key }));
+    if (action === 'rent') return fetchJson(buildUrlWithBase(cfg.base, '/sim/get_sim', { api_key: cfg.key, service_id: params.service_id, network_id: params.network_id, phone: params.phone }));
+    if (action === 'code') return fetchJson(buildUrlWithBase(cfg.base, '/otp/get_otp_by_phone_api_key', { api_key: cfg.key, otp_id: params.otp_id }));
+    if (action === 'cancel') return fetchJson(buildUrlWithBase(cfg.base, '/sim/cancel_api_key/' + encodeURIComponent(params.sim_id || ''), { api_key: cfg.key }));
   }
-  // Legacy chaycodeso3 adapter
-  const url = new URL(getApiBase());
-  Object.entries({ ...params, act: action, apik: key }).forEach(([k, v]) => {
+  const url = new URL(cfg.base);
+  const actMap = { account: 'account', services: 'app', rent: 'number', code: 'code', cancel: 'expired' };
+  Object.entries({ ...params, act: actMap[action] || action, apik: cfg.key }).forEach(([k, v]) => {
     if (v !== undefined && v !== null && String(v) !== '') url.searchParams.set(k, String(v));
   });
   return fetchJson(url);
 }
+function normalizeServices(provider, data) {
+  const arr = provider === 'codesim' ? (Array.isArray(data.data) ? data.data : []) : (Array.isArray(data.Result) ? data.Result : []);
+  return arr.map(a => ({
+    provider,
+    external_app_id: String(provider === 'codesim' ? (a.id || a.Id || '') : (a.Id || a.id || '')).trim(),
+    name: String(provider === 'codesim' ? (a.name || a.Name || '') : (a.Name || a.name || '')).trim(),
+    api_cost: Math.floor(Number(provider === 'codesim' ? (a.price || a.Cost || 0) : (a.Cost || a.price || 0)))
+  })).filter(x => x.external_app_id && x.name);
+}
 async function cancelExternalRental(r) {
   if (r.cancelled_external || !r.external_sim_id) return null;
   try {
-    const out = await simApi('cancel', { sim_id: r.external_sim_id });
+    const out = await simApi(r.provider || 'legacy', 'cancel', { sim_id: r.external_sim_id, id: r.external_sim_id });
     r.cancelled_external = 1;
     return out;
   } catch (e) {
@@ -242,7 +266,9 @@ async function processExpiredRentals() {
 }
 function safeSettingsForUser(settings, isAdmin) {
   const out = { ...settings };
-  if (!isAdmin) delete out.apiKey;
+  if (!isAdmin) { delete out.apiKey; delete out.legacyApiKey; delete out.codesimApiKey; }
+  if (isAdmin && out.legacyApiKey) out.legacyApiKeyMasked = out.legacyApiKey.slice(0, 6) + '...' + out.legacyApiKey.slice(-4);
+  if (isAdmin && out.codesimApiKey) out.codesimApiKeyMasked = out.codesimApiKey.slice(0, 6) + '...' + out.codesimApiKey.slice(-4);
   if (isAdmin && out.apiKey) out.apiKeyMasked = out.apiKey.slice(0, 6) + '...' + out.apiKey.slice(-4);
   return out;
 }
@@ -294,18 +320,21 @@ app.post('/api/rentals', auth, async (req, res) => {
     if (!service.external_app_id) return res.status(400).json({ error: 'Dịch vụ này chưa gắn Service ID API. Admin hãy đồng bộ API hoặc nhập Service ID.' });
     if ((req.user.balance || 0) < service.price) return res.status(400).json({ error: 'Số dư web không đủ, vui lòng nạp thêm tiền' });
     const networkId = String(req.body.carrier || '').trim();
-    const apiResult = await simApi('rent', { service_id: service.external_app_id, network_id: networkId });
-    if (!isCodesimOk(apiResult)) return res.status(400).json({ error: apiResult.message || 'API không cấp được số', api: apiResult });
-    const result = apiResult.data || {};
-    if (!result.phone || !result.otpId) return res.status(400).json({ error: apiResult.message || 'API không trả về số sim/OTP ID', api: apiResult });
-    const cost = Math.floor(Number(result.payment || service.price || 0));
+    const apiResult = await simApi(service.provider || 'legacy', 'rent', { service_id: service.external_app_id, appId: service.external_app_id, carrier: networkId, network_id: networkId });
+    if (!isProviderOk(service.provider || 'legacy', apiResult)) return res.status(400).json({ error: apiResult.message || apiResult.Msg || 'API không cấp được số', api: apiResult });
+    const result = (service.provider === 'codesim') ? (apiResult.data || {}) : (apiResult.Result || {});
+    const phone = service.provider === 'codesim' ? result.phone : (String(result.Number || '').startsWith('0') ? String(result.Number || '') : ('0' + String(result.Number || '')));
+    const otpId = service.provider === 'codesim' ? result.otpId : result.Id;
+    const simId = service.provider === 'codesim' ? result.simId : result.Id;
+    if (!phone || !otpId) return res.status(400).json({ error: apiResult.message || apiResult.Msg || 'API không trả về số sim/OTP ID', api: apiResult });
+    const cost = Math.floor(Number(result.payment || result.Cost || service.price || 0));
     req.user.balance = Math.floor(Number(req.user.balance || 0) - Number(service.price || cost));
-    const displayNumber = String(result.phone || '');
+    const displayNumber = String(phone || '');
     const rental = {
       id: uid('r'), user_id: req.user.id, service_id: service.id, service_name: service.name,
       network: networkId || service.network || '', phone_number: displayNumber, price: service.price, api_cost: cost,
-      external_id: String(result.otpId || ''), external_sim_id: String(result.simId || ''), api_app_id: String(service.external_app_id),
-      status: 'Đang chờ code', rented_at: now(), ended_at: '', otp_code: '', sms: '', note: apiResult.message || ''
+      external_id: String(otpId || ''), external_sim_id: String(simId || ''), api_app_id: String(service.external_app_id), provider: service.provider || 'legacy',
+      status: 'Đang chờ code', rented_at: now(), ended_at: '', otp_code: '', sms: '', note: apiResult.message || apiResult.Msg || ''
     };
     db.rentals.push(rental); saveDb();
     res.json({ rental, user: cleanUser(req.user), api: apiResult });
@@ -320,12 +349,16 @@ app.post('/api/rentals/:id/check-code', auth, async (req, res) => {
     if (!r) return res.status(404).json({ error: 'Không tìm thấy lượt thuê' });
     if (r.refunded) return res.json({ rental: r, api: { message: r.note || 'Đã tự hoàn tiền' }, user: cleanUser(req.user) });
     if (!r.external_id) return res.status(400).json({ error: 'Lượt thuê này không có OTP ID API' });
-    const apiResult = await simApi('code', { otp_id: r.external_id });
-    if (isCodesimOk(apiResult) && apiResult.data && apiResult.data.code) {
+    const apiResult = await simApi(r.provider || 'legacy', 'code', { otp_id: r.external_id, id: r.external_id });
+    const provider = r.provider || 'legacy';
+    if (provider === 'codesim' && isProviderOk(provider, apiResult) && apiResult.data && apiResult.data.code) {
       const result = apiResult.data || {};
       r.status = 'Đã nhận code'; r.otp_code = String(result.code || ''); r.sms = String(result.content || ''); r.ended_at = now(); r.note = apiResult.message || '';
+    } else if (provider === 'legacy' && isProviderOk(provider, apiResult) && apiResult.Result && apiResult.Result.Code) {
+      const result = apiResult.Result || {};
+      r.status = 'Đã nhận code'; r.otp_code = String(result.Code || ''); r.sms = String(result.SMS || ''); r.ended_at = now(); r.note = apiResult.Msg || '';
     } else {
-      r.note = apiResult.message || 'Chưa có OTP, vui lòng thử lại sau ít nhất 4 giây';
+      r.note = apiResult.message || apiResult.Msg || 'Chưa có OTP, vui lòng thử lại sau';
     }
     saveDb();
     res.json({ rental: r, api: apiResult, user: cleanUser(req.user) });
@@ -337,9 +370,9 @@ app.post('/api/rentals/:id/cancel', auth, async (req, res) => {
     if (!r) return res.status(404).json({ error: 'Không tìm thấy lượt thuê' });
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'User không được hủy sim đang thuê. Hệ thống sẽ tự hoàn tiền nếu hết thời gian chờ OTP mà chưa nhận được OTP.' });
     if (!r.external_sim_id) return res.status(400).json({ error: 'Lượt thuê này không có Sim ID API' });
-    const apiResult = await simApi('cancel', { sim_id: r.external_sim_id });
-    if (isCodesimOk(apiResult)) { r.status = 'Đã hủy'; r.ended_at = now(); r.cancelled_external = 1; }
-    r.note = apiResult.message || r.note || ''; saveDb();
+    const apiResult = await simApi(r.provider || 'legacy', 'cancel', { sim_id: r.external_sim_id, id: r.external_sim_id });
+    if (isProviderOk(r.provider || 'legacy', apiResult)) { r.status = 'Đã hủy'; r.ended_at = now(); r.cancelled_external = 1; }
+    r.note = apiResult.message || apiResult.Msg || r.note || ''; saveDb();
     res.json({ rental: r, api: apiResult });
   } catch (e) { res.status(500).json({ error: e.message || 'Không hủy được lượt thuê' }); }
 });
@@ -381,7 +414,7 @@ app.delete('/api/admin/users/:id', auth, adminOnly, (req, res) => {
 });
 
 app.post('/api/admin/services', auth, adminOnly, (req, res) => {
-  const s = { id: uid('s'), name: String(req.body.name || '').trim(), network: String(req.body.network || '').trim(), price: Math.floor(Number(req.body.price || 0)), visible: req.body.visible ? 1 : 0, description: String(req.body.description || ''), imageUrl: String(req.body.imageUrl || ''), external_app_id: String(req.body.external_app_id || '').trim(), api_cost: Math.floor(Number(req.body.api_cost || 0)), created_at: now(), updated_at: now() };
+  const s = { id: uid('s'), provider: String(req.body.provider || 'legacy'), name: String(req.body.name || '').trim(), network: String(req.body.network || '').trim(), price: Math.floor(Number(req.body.price || 0)), visible: req.body.visible ? 1 : 0, description: String(req.body.description || ''), imageUrl: String(req.body.imageUrl || ''), external_app_id: String(req.body.external_app_id || '').trim(), api_cost: Math.floor(Number(req.body.api_cost || 0)), created_at: now(), updated_at: now() };
   if (!s.name) return res.status(400).json({ error: 'Thiếu tên dịch vụ' }); db.services.push(s); saveDb(); res.json(s);
 });
 app.post('/api/admin/services/hide-all', auth, adminOnly, (req, res) => {
@@ -392,7 +425,7 @@ app.post('/api/admin/services/hide-all', auth, adminOnly, (req, res) => {
 
 app.patch('/api/admin/services/:id', auth, adminOnly, (req, res) => {
   const s = db.services.find(x => x.id === req.params.id); if (!s) return res.status(404).json({ error: 'Không tìm thấy dịch vụ' });
-  ['name','network','description','external_app_id','imageUrl'].forEach(k => { if (req.body[k] !== undefined) s[k] = String(req.body[k]); });
+  ['name','network','description','external_app_id','imageUrl','provider'].forEach(k => { if (req.body[k] !== undefined) s[k] = String(req.body[k]); });
   if (req.body.price !== undefined) s.price = Math.floor(Number(req.body.price || 0));
   if (req.body.visible !== undefined) s.visible = req.body.visible ? 1 : 0;
   if (req.body.api_cost !== undefined) s.api_cost = Math.floor(Number(req.body.api_cost || 0));
@@ -414,28 +447,39 @@ app.patch('/api/admin/deposits/:id', auth, adminOnly, (req, res) => {
 });
 app.get('/api/admin/notifications', auth, adminOnly, (req, res) => res.json(db.notifications.sort((a,b) => b.created_at.localeCompare(a.created_at)).slice(0,100)));
 app.patch('/api/admin/notifications/read', auth, adminOnly, (req, res) => { db.notifications.forEach(n => n.read = 1); saveDb(); res.json({ ok: true }); });
-app.patch('/api/admin/settings', auth, adminOnly, (req, res) => { ['siteName','brandText','logoUrl','adUrl','themeColor','layoutMode','depositInfo','qrImage','apiBaseUrl','apiKey','apiProvider','otpTimeoutMinutes'].forEach(k => { if (req.body[k] !== undefined) db.settings[k] = String(req.body[k]); }); saveDb(); res.json(safeSettingsForUser(db.settings, true)); });
+app.patch('/api/admin/settings', auth, adminOnly, (req, res) => { ['siteName','brandText','logoUrl','adUrl','themeColor','layoutMode','depositInfo','qrImage','apiBaseUrl','apiKey','apiProvider','legacyApiBaseUrl','legacyApiKey','codesimApiBaseUrl','codesimApiKey','otpTimeoutMinutes'].forEach(k => { if (req.body[k] !== undefined) db.settings[k] = String(req.body[k]); }); saveDb(); res.json(safeSettingsForUser(db.settings, true)); });
 app.get('/api/admin/sim-api/account', auth, adminOnly, async (req, res) => {
-  try { res.json(await simApi('account')); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const provider = String(req.query.provider || 'legacy');
+    res.json(await simApi(provider, 'account'));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.get('/api/admin/sim-api/apps', auth, adminOnly, async (req, res) => {
-  try { res.json(await simApi('services')); } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const provider = String(req.query.provider || 'legacy');
+    res.json(await simApi(provider, 'services'));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/admin/sim-api/sync-apps', auth, adminOnly, async (req, res) => {
   try {
-    const data = await simApi('services');
-    if (!isCodesimOk(data)) return res.status(400).json({ error: data.message || 'API không trả danh sách dịch vụ', api: data });
-    const apps = Array.isArray(data.data) ? data.data : [];
-    let added = 0, updated = 0;
-    apps.forEach(a => {
-      const appId = String(a.id || a.Id || '').trim(); if (!appId) return;
-      const name = String(a.name || a.Name || ('Service ' + appId));
-      const apiCost = Math.floor(Number(a.price || a.Cost || 0));
-      let s = db.services.find(x => String(x.external_app_id || '') === appId);
-      if (s) { s.name = name; s.api_cost = apiCost; if (!s.price || Number(req.body.overwritePrice)) s.price = apiCost; s.updated_at = now(); updated++; }
-      else { db.services.push({ id: uid('s'), name, network: '', price: apiCost, visible: 0, description: '', imageUrl: '', external_app_id: appId, api_cost: apiCost, created_at: now(), updated_at: now() }); added++; }
+    const providers = ['legacy','codesim'];
+    const results = await Promise.allSettled(providers.map(p => simApi(p, 'services')));
+    let added = 0, updated = 0, total = 0;
+    const errors = [];
+    results.forEach((r, idx) => {
+      const provider = providers[idx];
+      if (r.status !== 'fulfilled') { errors.push(provider + ': ' + r.reason.message); return; }
+      const data = r.value;
+      if (!isProviderOk(provider, data)) { errors.push(provider + ': ' + (data.message || data.Msg || 'API không OK')); return; }
+      const apps = normalizeServices(provider, data);
+      total += apps.length;
+      apps.forEach(a => {
+        let s = db.services.find(x => String(x.provider || 'legacy') === provider && String(x.external_app_id || '') === a.external_app_id);
+        if (s) { s.name = a.name; s.api_cost = a.api_cost; if (!s.price || Number(req.body.overwritePrice)) s.price = a.api_cost; s.provider = provider; s.updated_at = now(); updated++; }
+        else { db.services.push({ id: uid('s'), provider, name: a.name, network: '', price: a.api_cost, visible: 0, description: '', imageUrl: '', external_app_id: a.external_app_id, api_cost: a.api_cost, created_at: now(), updated_at: now() }); added++; }
+      });
     });
-    saveDb(); res.json({ ok: true, added, updated, total: apps.length });
+    saveDb(); res.json({ ok: true, added, updated, total, errors });
   } catch (e) { res.status(500).json({ error: e.message || 'Không đồng bộ được app API' }); }
 });
 
