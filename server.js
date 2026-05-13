@@ -1,4 +1,4 @@
-
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -6,7 +6,6 @@ const fs = require('fs');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
-const { MongoClient } = require('mongodb');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -18,11 +17,6 @@ const root = __dirname;
 const dataDir = path.join(root, 'data');
 const uploadDir = path.join(root, 'uploads');
 const dbFile = path.join(dataDir, 'app-data.json');
-const MONGODB_URI = process.env.MONGODB_URI || '';
-const MONGODB_DB = process.env.MONGODB_DB || 'co_all_dich_vu';
-let mongoClient = null;
-let mongoCollection = null;
-let dbMode = 'json';
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
@@ -45,21 +39,9 @@ const defaults = {
     apiKey: '248c26ea0cd1371009db5dd443339ca1'
   }
 };
-let db = null;
+let db = loadDb();
 
-async function initStorage() {
-  if (MONGODB_URI) {
-    mongoClient = new MongoClient(MONGODB_URI);
-    await mongoClient.connect();
-    mongoCollection = mongoClient.db(MONGODB_DB).collection('appdata');
-    const doc = await mongoCollection.findOne({ _id: 'main' });
-    if (doc && doc.data) {
-      dbMode = 'mongo';
-      return { ...defaults, ...doc.data, settings: { ...defaults.settings, ...(doc.data.settings || {}) } };
-    }
-    dbMode = 'mongo';
-    return JSON.parse(JSON.stringify(defaults));
-  }
+function loadDb() {
   try {
     if (fs.existsSync(dbFile)) {
       const parsed = JSON.parse(fs.readFileSync(dbFile, 'utf8'));
@@ -68,20 +50,12 @@ async function initStorage() {
   } catch (e) { console.error('Không đọc được database JSON:', e); }
   return JSON.parse(JSON.stringify(defaults));
 }
-let saveQueue = Promise.resolve();
 function saveDb() {
-  saveQueue = saveQueue.then(async () => {
-    if (dbMode === 'mongo' && mongoCollection) {
-      await mongoCollection.replaceOne({ _id: 'main' }, { _id: 'main', data: db, updated_at: new Date() }, { upsert: true });
-      return;
-    }
-    const tmp = dbFile + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
-    fs.renameSync(tmp, dbFile);
-  }).catch(e => console.error('Không lưu được database:', e));
-  return saveQueue;
+  const tmp = dbFile + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
+  fs.renameSync(tmp, dbFile);
 }
-async function migrate() {
+function migrate() {
   let changed = false;
   if (!db.users.find(u => u.username === ADMIN_USERNAME)) {
     db.users.push({ id: uid('u'), username: ADMIN_USERNAME, password_hash: bcrypt.hashSync(ADMIN_PASSWORD, 10), role: 'admin', balance: 0, created_at: now(), last_login: now(), status: 'active' });
@@ -97,20 +71,20 @@ async function migrate() {
     ].forEach(s => db.services.push({ id: uid('s'), name: s[0], network: s[1], price: s[2], visible: 1, description: s[3], created_at: now(), updated_at: now() }));
     changed = true;
   }
-  if (changed) await saveDb();
+  if (changed) saveDb();
 }
+migrate();
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use('/uploads', express.static(uploadDir));
 app.use(express.static(path.join(root, 'public')));
 
-const storage = multer.memoryStorage();
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => cb(null, Date.now() + '_' + file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_'))
+});
 const upload = multer({ storage, limits: { fileSize: 5 * 1024 * 1024 } });
-function fileToDataUrl(file) {
-  if (!file || !file.buffer) return '';
-  return `data:${file.mimetype || 'application/octet-stream'};base64,${file.buffer.toString('base64')}`;
-}
 
 function sign(user) { return jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: '7d' }); }
 function cleanUser(u) { return u ? { id: u.id, username: u.username, role: u.role, balance: u.balance || 0, created_at: u.created_at, last_login: u.last_login, status: u.status || 'active' } : null; }
@@ -147,7 +121,7 @@ function safeSettingsForUser(settings, isAdmin) {
   return out;
 }
 
-app.get('/api/health', (req, res) => res.json({ ok: true, app: 'Có All Dịch Vụ', db: dbMode, time: now() }));
+app.get('/api/health', (req, res) => res.json({ ok: true, app: 'Có All Dịch Vụ', db: 'json', time: now() }));
 app.get('/api/settings', (req, res) => {
   let isAdmin = false;
   try {
@@ -246,13 +220,13 @@ app.post('/api/rentals/:id/cancel', auth, async (req, res) => {
 app.post('/api/deposits', auth, upload.single('proof'), (req, res) => {
   const amount = Math.floor(Number(req.body.amount || 0));
   if (amount <= 0) return res.status(400).json({ error: 'Số tiền nạp không hợp lệ' });
-  const dep = { id: uid('d'), user_id: req.user.id, amount, content: String(req.body.content || ''), proof_image: req.file ? fileToDataUrl(req.file) : '', status: 'Chờ duyệt', admin_note: '', created_at: now(), reviewed_at: '' };
+  const dep = { id: uid('d'), user_id: req.user.id, amount, content: String(req.body.content || ''), proof_image: req.file ? '/uploads/' + req.file.filename : '', status: 'Chờ duyệt', admin_note: '', created_at: now(), reviewed_at: '' };
   db.deposits.push(dep);
   db.notifications.push({ id: uid('n'), type: 'deposit', message: `${req.user.username} gửi yêu cầu nạp ${amount.toLocaleString('vi-VN')}đ`, read: 0, created_at: now() });
   saveDb(); res.json(dep);
 });
 app.get('/api/deposits', auth, (req, res) => res.json(db.deposits.filter(d => d.user_id === req.user.id).sort((a,b) => b.created_at.localeCompare(a.created_at))));
-app.post('/api/upload', auth, adminOnly, upload.single('file'), (req, res) => { if (!req.file) return res.status(400).json({ error: 'Chưa có file' }); res.json({ url: fileToDataUrl(req.file) }); });
+app.post('/api/upload', auth, adminOnly, upload.single('file'), (req, res) => { if (!req.file) return res.status(400).json({ error: 'Chưa có file' }); res.json({ url: '/uploads/' + req.file.filename }); });
 
 app.get('/api/admin/users', auth, adminOnly, (req, res) => res.json(db.users.map(u => ({ ...cleanUser(u), days_inactive: daysInactive(u) })).sort((a,b) => a.role.localeCompare(b.role) || a.username.localeCompare(b.username))));
 app.patch('/api/admin/users/:id', auth, adminOnly, (req, res) => {
@@ -328,9 +302,4 @@ app.post('/api/admin/sim-api/sync-apps', auth, adminOnly, async (req, res) => {
 });
 
 app.get('*', (req, res) => res.sendFile(path.join(root, 'public', 'index.html')));
-async function start() {
-  db = await initStorage();
-  await migrate();
-  app.listen(PORT, () => console.log(`Có All Dịch Vụ running at http://localhost:${PORT} - storage: ${dbMode}`));
-}
-start().catch(err => { console.error('Không khởi động được server:', err); process.exit(1); });
+app.listen(PORT, () => console.log(`Có All Dịch Vụ running at http://localhost:${PORT}`));
