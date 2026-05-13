@@ -3,7 +3,7 @@ let token = localStorage.getItem('token') || '';
 let me = null;
 let settings = {};
 let tab = 'services';
-let services = [], rentals = [], deposits = [], users = [], adminRentals = [], adminDeposits = [], notifications = [];
+let services = [], rentals = [], deposits = [], users = [], adminRentals = [], adminDeposits = [], notifications = [], dmxProducts = [], dmxOrders = [];
 
 const $ = s => document.querySelector(s);
 const app = $('#app');
@@ -34,8 +34,8 @@ function header(){
   return `<div class="top"><div class="wrap topin"><div class="brand">${settings.logoUrl?`<img class="logo" src="${esc(settings.logoUrl)}">`:`<div class="logo"></div>`}<div><h1>${esc(settings.siteName||'Có All Dịch Vụ')}</h1><p>${esc(settings.brandText||'')}</p></div></div><div class="userbar"><span class="pill">${esc(me.username)} ${me.role==='admin'?'• Admin':''}</span><span class="pill">Số dư: <b>${fmt(me.balance)}</b></span><button class="secondary" onclick="logout()">Đăng xuất</button></div></div></div>`;
 }
 function menu(){
-  const common = [['services','Dịch vụ'],['history','Lịch sử'],['deposit','Nạp tiền']];
-  const admin = [['admin_services','Dịch vụ admin'],['admin_api','API thuê sim'],['admin_history','Lịch sử admin'],['admin_deposit_info','Nạp tiền admin'],['admin_users','Quản lý người dùng'],['admin_web','Quản lý web'],['admin_approve','Duyệt nạp tiền']];
+  const common = [['services','Dịch vụ'],['dmx','Dịch Vụ DMX'],['dmx_history','Lịch sử DMX'],['history','Lịch sử'],['deposit','Nạp tiền']];
+  const admin = [['admin_services','Dịch vụ admin'],['admin_dmx','Quản lý DMX'],['admin_dmx_orders','Đơn hàng DMX'],['admin_api','API thuê sim'],['admin_history','Lịch sử admin'],['admin_deposit_info','Nạp tiền admin'],['admin_users','Quản lý người dùng'],['admin_web','Quản lý web'],['admin_approve','Duyệt nạp tiền']];
   const items = me.role==='admin' ? common.concat(admin) : common;
   return `<div class="side">${items.map(i=>`<button class="tab ${tab===i[0]?'active':''}" onclick="setTab('${i[0]}')">${i[1]}${i[0]==='admin_approve'&&notifications.filter(n=>!n.read).length?` (${notifications.filter(n=>!n.read).length})`:''}</button>`).join('')}</div>`;
 }
@@ -55,9 +55,13 @@ async function login(){ try{ const d=await api('/api/login',{method:'POST',body:
 async function register(){ try{ const d=await api('/api/register',{method:'POST',body:JSON.stringify({username:$('#username').value,password:$('#password').value})}); token=d.token; localStorage.setItem('token',token); me=d.user; tab='services'; await loadPage(); }catch(e){ $('#msg').innerHTML=`<div class="notice err">${esc(e.message)}</div>`; } }
 async function renderTab(){
   if(tab==='services') return userServices();
+  if(tab==='dmx') return userDmx();
+  if(tab==='dmx_history') return userDmxHistory();
   if(tab==='history') return userHistory();
   if(tab==='deposit') return userDeposit();
   if(tab==='admin_services') return adminServices();
+  if(tab==='admin_dmx') return adminDmx();
+  if(tab==='admin_dmx_orders') return adminDmxOrders();
   if(tab==='admin_api') return adminApi();
   if(tab==='admin_history') return adminHistory();
   if(tab==='admin_deposit_info') return adminDepositInfo();
@@ -77,6 +81,41 @@ async function checkCode(id){ try{ const d=await api('/api/rentals/'+id+'/check-
 async function cancelRental(id){ if(!confirm('Hủy lượt thuê này?')) return; try{ const d=await api('/api/rentals/'+id+'/cancel',{method:'POST',body:JSON.stringify({})}); toast(d.api?.message || d.api?.Msg || 'Đã gửi yêu cầu hủy'); await loadPage(); }catch(e){ toast(e.message,false); } }
 function tableRentals(rows){ if(!rows.length) return '<p class="muted">Chưa có dữ liệu.</p>'; return `<div class="tablewrap"><table class="table"><tr><th>Dịch vụ</th><th>Nhà mạng</th><th>Số sim</th><th>Giá</th><th>Trạng thái</th><th>OTP/SMS</th><th>Thời gian</th><th>Thao tác</th></tr>${rows.map(r=>`<tr><td>${esc(r.service_name)}</td><td>${esc(r.network)}</td><td><b>${esc(r.phone_number)}</b></td><td>${fmt(r.price)}</td><td><span class="badge">${esc(r.status)}</span><br><small>${esc(r.note||'')}</small></td><td><b>${esc(r.otp_code||'Chưa có')}</b><br><small>${esc(r.sms||'')}</small></td><td>${date(r.rented_at)}</td><td>${r.external_id?`<button class="small ok" onclick="checkCode('${r.id}')">Lấy code</button>`:''} ${r.service_id?`<button class="small" onclick="rent('${r.service_id}')">Thuê lại</button>`:''}</td></tr>`).join('')}</table></div>`; }
 async function userHistory(){ rentals=await api('/api/rentals'); $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Lịch sử thuê sim</h2>${tableRentals(rentals)}</div>`); }
+
+async function userDmx(){
+  dmxProducts = await api('/api/dmx/products');
+  const cats = [...new Set(dmxProducts.map(p=>p.category).filter(Boolean))].sort();
+  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Dịch Vụ DMX</h2><div class="row"><div class="field"><label>Tìm kiếm sản phẩm</label><input id="dmxSearch" placeholder="Nhập tên sản phẩm" oninput="renderDmxProducts()"></div><div class="field"><label>Lọc phân loại</label><select id="dmxCategory" onchange="renderDmxProducts()"><option value="">Tất cả phân loại</option>${cats.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select></div></div><div id="dmxProductList"></div></div>`);
+  renderDmxProducts();
+}
+function dmxUnitPrice(p, qty){ qty=Math.max(1,Number(qty||1)); const min=Number(p.bulkMinQty||0), bulk=Number(p.bulkPrice||0), price=Number(p.price||0); return min>0&&bulk>0&&qty>=min?bulk:price; }
+function renderDmxProducts(){
+  const q=($('#dmxSearch')?.value||'').toLowerCase().trim();
+  const cat=$('#dmxCategory')?.value||'';
+  const rows=dmxProducts.filter(p=>(!q||[p.name,p.category,p.description].join(' ').toLowerCase().includes(q))&&(!cat||p.category===cat));
+  $('#dmxProductList').innerHTML = rows.length ? `<div class="servicegrid">${rows.map(p=>`<div class="svc">${p.imageUrl?`<img class="svc-img" src="${esc(p.imageUrl)}">`:''}<h3>${esc(p.name)}</h3><p class="muted">${esc(p.category||'Chưa phân loại')}</p><p>${esc(p.description||'')}</p><div class="price">${fmt(p.price)}</div>${p.bulkMinQty&&p.bulkPrice?`<p class="muted">Mua từ ${p.bulkMinQty}: ${fmt(p.bulkPrice)}/sp</p>`:''}<div class="field"><label>Số lượng</label><input id="dmxQty_${p.id}" type="number" min="1" value="1" oninput="updateDmxTotal('${p.id}')"></div><p id="dmxTotal_${p.id}" class="notice">Tổng: ${fmt(p.price)}</p><button onclick="buyDmx('${p.id}')">Mua sản phẩm</button></div>`).join('')}</div>` : '<p class="muted">Không tìm thấy sản phẩm.</p>';
+  rows.forEach(p=>updateDmxTotal(p.id));
+}
+function updateDmxTotal(id){ const p=dmxProducts.find(x=>x.id===id); if(!p||!$('#dmxTotal_'+id)) return; const q=Math.max(1,Number($('#dmxQty_'+id)?.value||1)); $('#dmxTotal_'+id).textContent='Tổng: '+fmt(dmxUnitPrice(p,q)*q); }
+async function buyDmx(id){
+  const p=dmxProducts.find(x=>x.id===id); const q=Math.max(1,Number($('#dmxQty_'+id)?.value||1));
+  if(!confirm(`Mua ${q} x ${p?.name||'sản phẩm'}?`)) return;
+  try{ const d=await api('/api/dmx/orders',{method:'POST',body:JSON.stringify({product_id:id,quantity:q})}); me=d.user; toast('Mua hàng thành công'); await loadMe(); tab='dmx_history'; await loadPage(); }catch(e){ toast(e.message,false); }
+}
+async function userDmxHistory(){ dmxOrders=await api('/api/dmx/orders'); $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Lịch sử mua DMX</h2>${tableDmxOrders(dmxOrders,false)}</div>`); }
+function tableDmxOrders(rows, admin=false){ if(!rows.length) return '<p class="muted">Chưa có đơn hàng DMX.</p>'; return `<div class="tablewrap"><table class="table"><tr>${admin?'<th>User</th>':''}<th>Ngày mua</th><th>Sản phẩm</th><th>Phân loại</th><th>Số lượng</th><th>Đơn giá</th><th>Tổng tiền</th><th>Trạng thái</th></tr>${rows.map(o=>`<tr>${admin?`<td>${esc(o.username||'')}</td>`:''}<td>${date(o.created_at)}</td><td>${o.imageUrl?`<img class="thumb" src="${esc(o.imageUrl)}">`:''}${esc(o.product_name)}</td><td>${esc(o.category||'')}</td><td>${o.quantity}</td><td>${fmt(o.unit_price)}</td><td><b>${fmt(o.total)}</b></td><td>${esc(o.status||'')}</td></tr>`).join('')}</table></div>`; }
+async function adminDmx(){
+  dmxProducts = await api('/api/dmx/products');
+  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Admin - Quản lý Dịch Vụ DMX</h2><div class="row3"><div class="field"><label>Tên sản phẩm</label><input id="dmxName"></div><div class="field"><label>Phân loại</label><input id="dmxCat" placeholder="VD: Tài khoản, Buff, Tool"></div><div class="field"><label>Giá tiền</label><input id="dmxPrice" type="number"></div></div><div class="row"><div class="field"><label>Mua từ số lượng</label><input id="dmxBulkMin" type="number" placeholder="VD: 10"></div><div class="field"><label>Giá giảm / sản phẩm</label><input id="dmxBulkPrice" type="number" placeholder="VD: 8000"></div></div><div class="field"><label>Mô tả</label><input id="dmxDesc"></div><div class="field"><label>Ảnh sản phẩm</label><input id="dmxImage" type="file" accept="image/*"></div><button onclick="addDmxProduct()">Thêm sản phẩm DMX</button></div><div class="card"><h3>Danh sách sản phẩm DMX</h3><div class="row"><div class="field"><label>Tìm kiếm</label><input id="adminDmxSearch" oninput="renderAdminDmxTable()" placeholder="Tên, phân loại"></div><div class="field"><label>Lọc phân loại</label><input id="adminDmxCat" oninput="renderAdminDmxTable()" placeholder="Nhập phân loại"></div></div><div id="adminDmxTable">${tableAdminDmx(dmxProducts)}</div></div>`);
+}
+function renderAdminDmxTable(){ const q=($('#adminDmxSearch')?.value||'').toLowerCase().trim(); const cat=($('#adminDmxCat')?.value||'').toLowerCase().trim(); const rows=dmxProducts.filter(p=>(!q||[p.name,p.category,p.description].join(' ').toLowerCase().includes(q))&&(!cat||String(p.category||'').toLowerCase().includes(cat))); $('#adminDmxTable').innerHTML=tableAdminDmx(rows); }
+function tableAdminDmx(rows){ if(!rows.length) return '<p class="muted">Chưa có sản phẩm DMX.</p>'; return `<div class="admin-service-list">${rows.map(p=>`<div class="admin-service-card"><div class="admin-service-grid"><div><label>Tên</label><input id="dmxn_${p.id}" value="${esc(p.name)}"></div><div><label>Phân loại</label><input id="dmxc_${p.id}" value="${esc(p.category||'')}"></div><div><label>Giá</label><input id="dmxp_${p.id}" type="number" value="${p.price||0}"></div><div><label>Từ SL</label><input id="dmxmin_${p.id}" type="number" value="${p.bulkMinQty||0}"></div><div><label>Giá giảm</label><input id="dmxbulk_${p.id}" type="number" value="${p.bulkPrice||0}"></div><div><label>Ảnh</label>${p.imageUrl?`<a href="${esc(p.imageUrl)}" target="_blank">Xem ảnh</a>`:'<span class="muted">Chưa có</span>'}<input id="dmximg_${p.id}" type="hidden" value="${esc(p.imageUrl||'')}"><input id="dmxfile_${p.id}" type="file" accept="image/*"></div><div><label>Hiển thị</label><div class="toggle-line"><input id="dmxv_${p.id}" type="checkbox" ${p.visible?'checked':''}><span>${p.visible?'Đang hiện':'Đang ẩn'}</span></div></div><div class="wide"><label>Mô tả</label><input id="dmxd_${p.id}" value="${esc(p.description||'')}"></div><div class="admin-actions"><button class="small" onclick="saveDmxProduct('${p.id}')">Lưu</button><button class="small danger" onclick="deleteDmxProduct('${p.id}')">Xóa</button></div></div></div>`).join('')}</div>`; }
+async function addDmxProduct(){ try{ let imageUrl=''; if($('#dmxImage')?.files[0]) imageUrl=await uploadFile($('#dmxImage')); await api('/api/admin/dmx/products',{method:'POST',body:JSON.stringify({name:$('#dmxName').value,category:$('#dmxCat').value,price:$('#dmxPrice').value,bulkMinQty:$('#dmxBulkMin').value,bulkPrice:$('#dmxBulkPrice').value,description:$('#dmxDesc').value,imageUrl,visible:false})}); toast('Đã thêm sản phẩm DMX'); await loadPage(); }catch(e){ toast(e.message,false); } }
+async function saveDmxProduct(id){ let imageUrl=$('#dmximg_'+id)?.value||''; if($('#dmxfile_'+id)?.files[0]) imageUrl=await uploadFile($('#dmxfile_'+id)); await api('/api/admin/dmx/products/'+id,{method:'PATCH',body:JSON.stringify({name:$('#dmxn_'+id).value,category:$('#dmxc_'+id).value,price:$('#dmxp_'+id).value,bulkMinQty:$('#dmxmin_'+id).value,bulkPrice:$('#dmxbulk_'+id).value,description:$('#dmxd_'+id).value,imageUrl,visible:$('#dmxv_'+id).checked})}); toast('Đã lưu sản phẩm DMX'); dmxProducts=await api('/api/dmx/products'); renderAdminDmxTable(); }
+async function deleteDmxProduct(id){ if(!confirm('Xóa sản phẩm DMX này?')) return; await api('/api/admin/dmx/products/'+id,{method:'DELETE'}); toast('Đã xóa sản phẩm'); dmxProducts=await api('/api/dmx/products'); renderAdminDmxTable(); }
+async function adminDmxOrders(){ const d=await api('/api/admin/dmx/orders'); const rows=d.rows||[]; $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Admin - Đơn hàng DMX</h2><div class="stats"><span class="pill">Tổng đơn: <b>${d.stats?.totalOrders||0}</b></span><span class="pill">Doanh thu: <b>${fmt(d.stats?.revenue||0)}</b></span></div><div class="row"><div class="field"><label>Tìm đơn theo user/sản phẩm</label><input id="dmxOrderSearch" oninput="renderAdminDmxOrders()" placeholder="username, sản phẩm, phân loại"></div><div class="field"><label>Lọc theo ngày</label><input id="dmxOrderDate" type="date" onchange="renderAdminDmxOrders()"></div></div><div id="dmxOrderTable"></div></div>`); window._adminDmxOrders=rows; renderAdminDmxOrders(); }
+function renderAdminDmxOrders(){ const rows=window._adminDmxOrders||[]; const q=($('#dmxOrderSearch')?.value||'').toLowerCase().trim(); const day=$('#dmxOrderDate')?.value||''; const filtered=rows.filter(o=>(!q||[o.username,o.product_name,o.category].join(' ').toLowerCase().includes(q))&&(!day||String(o.created_at||'').slice(0,10)===day)); $('#dmxOrderTable').innerHTML=tableDmxOrders(filtered,true); }
+
 async function userDeposit(){
   deposits=await api('/api/deposits');
   $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Nạp tiền</h2><div class="row"><div><div class="notice">${esc(settings.depositInfo||'')}</div>${settings.qrImage?`<img class="qr" src="${esc(settings.qrImage)}">`:''}</div><form onsubmit="sendDeposit(event)"><div class="field"><label>Số tiền đã nạp</label><input id="depAmount" type="number" min="1000" required></div><div class="field"><label>Nội dung chuyển khoản</label><input id="depContent" placeholder="VD: nap ${esc(me.username)}"></div><div class="field"><label>Ảnh bill/chứng từ</label><input id="depProof" type="file" accept="image/*"></div><button>Gửi yêu cầu nạp</button></form></div></div><div class="card"><h2>Lịch sử nạp</h2>${tableDeposits(deposits)}</div>`);

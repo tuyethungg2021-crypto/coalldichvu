@@ -49,7 +49,7 @@ function daysInactive(u) {
 }
 
 const defaults = {
-  users: [], services: [], rentals: [], deposits: [], notifications: [],
+  users: [], services: [], rentals: [], deposits: [], notifications: [], dmxProducts: [], dmxOrders: [],
   settings: {
     siteName: 'Có All Dịch Vụ',
     brandText: 'Thuê sim nhanh - nhiều nhà mạng - quản lý dễ dàng',
@@ -70,7 +70,7 @@ let db = null;
 
 function normalizeDb(parsed) {
   parsed = parsed || {};
-  return { ...defaults, ...parsed, settings: { ...defaults.settings, ...(parsed.settings || {}) } };
+  return { ...defaults, ...parsed, dmxProducts: parsed.dmxProducts || [], dmxOrders: parsed.dmxOrders || [], settings: { ...defaults.settings, ...(parsed.settings || {}) } };
 }
 async function loadDb() {
   if (MONGODB_URI) {
@@ -410,7 +410,7 @@ app.patch('/api/admin/users/:id', auth, adminOnly, (req, res) => {
 });
 app.delete('/api/admin/users/:id', auth, adminOnly, (req, res) => {
   if (req.params.id === req.user.id) return res.status(400).json({ error: 'Không thể xóa chính bạn' });
-  db.users = db.users.filter(u => u.id !== req.params.id); db.rentals = db.rentals.filter(r => r.user_id !== req.params.id); db.deposits = db.deposits.filter(d => d.user_id !== req.params.id); saveDb(); res.json({ ok: true });
+  db.users = db.users.filter(u => u.id !== req.params.id); db.rentals = db.rentals.filter(r => r.user_id !== req.params.id); db.deposits = db.deposits.filter(d => d.user_id !== req.params.id); db.dmxOrders = (db.dmxOrders||[]).filter(o => o.user_id !== req.params.id); saveDb(); res.json({ ok: true });
 });
 
 app.post('/api/admin/services', auth, adminOnly, (req, res) => {
@@ -481,6 +481,79 @@ app.post('/api/admin/sim-api/sync-apps', auth, adminOnly, async (req, res) => {
     });
     saveDb(); res.json({ ok: true, added, updated, total, errors });
   } catch (e) { res.status(500).json({ error: e.message || 'Không đồng bộ được app API' }); }
+});
+
+
+// DMX shop products and orders
+function dmxPrice(product, qty) {
+  qty = Math.max(1, Math.floor(Number(qty || 1)));
+  const normal = Math.max(0, Math.floor(Number(product.price || 0)));
+  const minQty = Math.floor(Number(product.bulkMinQty || 0));
+  const bulk = Math.floor(Number(product.bulkPrice || 0));
+  const unit = minQty > 0 && bulk > 0 && qty >= minQty ? bulk : normal;
+  return { unitPrice: unit, total: unit * qty };
+}
+app.get('/api/dmx/products', auth, (req, res) => {
+  const rows = (db.dmxProducts || []).filter(p => req.user.role === 'admin' || Number(p.visible) === 1)
+    .sort((a,b) => String(a.category||'').localeCompare(String(b.category||'')) || String(a.name||'').localeCompare(String(b.name||'')));
+  res.json(rows);
+});
+app.get('/api/dmx/orders', auth, (req, res) => {
+  const rows = (db.dmxOrders || []).filter(o => o.user_id === req.user.id)
+    .sort((a,b) => String(b.created_at).localeCompare(String(a.created_at)));
+  res.json(rows);
+});
+app.post('/api/dmx/orders', auth, (req, res) => {
+  const product = (db.dmxProducts || []).find(p => p.id === req.body.product_id && Number(p.visible) === 1);
+  if (!product) return res.status(404).json({ error: 'Sản phẩm không tồn tại hoặc đang ẩn' });
+  const quantity = Math.max(1, Math.floor(Number(req.body.quantity || 1)));
+  const price = dmxPrice(product, quantity);
+  if ((req.user.balance || 0) < price.total) return res.status(400).json({ error: 'Số dư không đủ để mua sản phẩm' });
+  req.user.balance = Math.floor(Number(req.user.balance || 0) - price.total);
+  const order = {
+    id: uid('dmxo'), user_id: req.user.id, product_id: product.id,
+    product_name: product.name, category: product.category || '', imageUrl: product.imageUrl || '',
+    quantity, unit_price: price.unitPrice, total: price.total,
+    status: 'Đã mua', note: String(req.body.note || ''), created_at: now()
+  };
+  db.dmxOrders = db.dmxOrders || [];
+  db.dmxOrders.push(order);
+  db.notifications.push({ id: uid('n'), type: 'dmx_order', message: `${req.user.username} mua ${quantity} x ${product.name} (${price.total.toLocaleString('vi-VN')}đ)`, read: 0, created_at: now() });
+  saveDb();
+  res.json({ order, user: cleanUser(req.user) });
+});
+app.get('/api/admin/dmx/orders', auth, adminOnly, (req, res) => {
+  const rows = (db.dmxOrders || []).map(o => ({ ...o, username: (db.users.find(u => u.id === o.user_id) || {}).username || 'unknown' }))
+    .sort((a,b) => String(b.created_at).localeCompare(String(a.created_at)));
+  const revenue = rows.reduce((sum,o)=>sum+Number(o.total||0),0);
+  res.json({ rows, stats: { totalOrders: rows.length, revenue } });
+});
+app.post('/api/admin/dmx/products', auth, adminOnly, (req, res) => {
+  const p = {
+    id: uid('dmxp'), name: String(req.body.name || '').trim(), category: String(req.body.category || '').trim(),
+    price: Math.floor(Number(req.body.price || 0)), bulkMinQty: Math.floor(Number(req.body.bulkMinQty || 0)),
+    bulkPrice: Math.floor(Number(req.body.bulkPrice || 0)), visible: req.body.visible ? 1 : 0,
+    description: String(req.body.description || ''), imageUrl: String(req.body.imageUrl || ''),
+    created_at: now(), updated_at: now()
+  };
+  if (!p.name) return res.status(400).json({ error: 'Thiếu tên sản phẩm' });
+  if (p.price <= 0) return res.status(400).json({ error: 'Giá sản phẩm không hợp lệ' });
+  db.dmxProducts = db.dmxProducts || [];
+  db.dmxProducts.push(p); saveDb(); res.json(p);
+});
+app.patch('/api/admin/dmx/products/:id', auth, adminOnly, (req, res) => {
+  const p = (db.dmxProducts || []).find(x => x.id === req.params.id);
+  if (!p) return res.status(404).json({ error: 'Không tìm thấy sản phẩm' });
+  ['name','category','description','imageUrl'].forEach(k => { if (req.body[k] !== undefined) p[k] = String(req.body[k]); });
+  if (req.body.price !== undefined) p.price = Math.floor(Number(req.body.price || 0));
+  if (req.body.bulkMinQty !== undefined) p.bulkMinQty = Math.floor(Number(req.body.bulkMinQty || 0));
+  if (req.body.bulkPrice !== undefined) p.bulkPrice = Math.floor(Number(req.body.bulkPrice || 0));
+  if (req.body.visible !== undefined) p.visible = req.body.visible ? 1 : 0;
+  p.updated_at = now(); saveDb(); res.json(p);
+});
+app.delete('/api/admin/dmx/products/:id', auth, adminOnly, (req, res) => {
+  db.dmxProducts = (db.dmxProducts || []).filter(p => p.id !== req.params.id);
+  saveDb(); res.json({ ok: true });
 });
 
 app.get('*', (req, res) => res.sendFile(path.join(root, 'public', 'index.html')));
