@@ -49,13 +49,17 @@ function daysInactive(u) {
 }
 
 const defaults = {
-  users: [], services: [], rentals: [], deposits: [], notifications: [], dmxProducts: [], dmxOrders: [],
+  users: [], services: [], rentals: [], deposits: [], notifications: [], dmxProducts: [], dmxOrders: [], sepayTransactions: [],
   settings: {
     siteName: 'Có All Dịch Vụ',
     brandText: 'Thuê sim nhanh - nhiều nhà mạng - quản lý dễ dàng',
     logoUrl: '', adUrl: '', themeColor: '#2563eb', layoutMode: 'modern',
     depositInfo: 'Ngân hàng: MB Bank\nSố tài khoản: 0123456789\nChủ tài khoản: HUNG NBYT\nNội dung: nap username',
     qrImage: '',
+    sepayBankCode: process.env.SEPAY_BANK || 'MB',
+    sepayAccount: process.env.SEPAY_ACCOUNT || '8006123454321',
+    sepayAccountName: process.env.SEPAY_ACCOUNT_NAME || 'NGUYEN VAN HUNG',
+    sepayEnabled: '1',
     legacyApiBaseUrl: 'https://chaycodeso3.com/api',
     legacyApiKey: '248c26ea0cd1371009db5dd443339ca1',
     codesimApiBaseUrl: 'https://apisim.codesim.net',
@@ -70,7 +74,7 @@ let db = null;
 
 function normalizeDb(parsed) {
   parsed = parsed || {};
-  return { ...defaults, ...parsed, dmxProducts: parsed.dmxProducts || [], dmxOrders: parsed.dmxOrders || [], settings: { ...defaults.settings, ...(parsed.settings || {}) } };
+  return { ...defaults, ...parsed, dmxProducts: parsed.dmxProducts || [], dmxOrders: parsed.dmxOrders || [], sepayTransactions: parsed.sepayTransactions || [], settings: { ...defaults.settings, ...(parsed.settings || {}) } };
 }
 async function loadDb() {
   if (MONGODB_URI) {
@@ -379,6 +383,99 @@ app.post('/api/rentals/:id/cancel', auth, async (req, res) => {
 
 
 
+
+function onlyDigits(v) { return String(v ?? '').replace(/[^0-9]/g, ''); }
+function normText(v) { return String(v ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9_]+/g, ' ').trim(); }
+function makeSepayCode(username) { return ('NAP ' + String(username || '').toLowerCase() + ' ' + Math.random().toString(36).slice(2, 7).toUpperCase()).trim(); }
+function buildSepayQr(amount, content) {
+  const bank = String(db.settings.sepayBankCode || process.env.SEPAY_BANK || 'MB').trim();
+  const account = String(db.settings.sepayAccount || process.env.SEPAY_ACCOUNT || '').trim();
+  const name = String(db.settings.sepayAccountName || process.env.SEPAY_ACCOUNT_NAME || '').trim();
+  if (!bank || !account) return '';
+  const q = new URLSearchParams();
+  if (amount) q.set('amount', String(Math.floor(Number(amount || 0))));
+  q.set('addInfo', String(content || ''));
+  if (name) q.set('accountName', name);
+  return `https://img.vietqr.io/image/${encodeURIComponent(bank)}-${encodeURIComponent(account)}-compact2.png?${q.toString()}`;
+}
+function extractSepayPayload(body) {
+  const b = body || {};
+  const amount = Math.floor(Number(b.transferAmount ?? b.amount ?? b.money ?? b.creditAmount ?? b.transactionAmount ?? b.value ?? 0));
+  const content = String(b.content ?? b.description ?? b.transferContent ?? b.transactionContent ?? b.transaction_content ?? b.memo ?? b.note ?? '');
+  const ref = String(b.id ?? b.referenceCode ?? b.reference_code ?? b.transactionId ?? b.transaction_id ?? b.gatewayTransactionId ?? b.code ?? b.transactionDate ?? '');
+  const type = String(b.transferType ?? b.type ?? b.direction ?? '').toLowerCase();
+  return { amount, content, ref, type };
+}
+function findUserBySepayContent(content) {
+  const normalized = normText(content);
+  return (db.users || []).find(u => normalized.includes(normText(u.username)));
+}
+function approveDeposit(dep, transactionRef, rawPayload) {
+  if (!dep || dep.status === 'Đã duyệt') return false;
+  const u = db.users.find(x => x.id === dep.user_id);
+  if (!u) return false;
+  u.balance = Math.floor(Number(u.balance || 0) + Number(dep.amount || 0));
+  dep.status = 'Đã duyệt';
+  dep.admin_note = 'Tự động cộng tiền qua SePay' + (transactionRef ? ` (${transactionRef})` : '');
+  dep.reviewed_at = now();
+  dep.sepay_ref = transactionRef || dep.sepay_ref || '';
+  dep.sepay_payload = rawPayload || dep.sepay_payload || null;
+  db.notifications.push({ id: uid('n'), type: 'deposit_auto', message: `Đã tự cộng ${Number(dep.amount||0).toLocaleString('vi-VN')}đ cho ${(u||{}).username || 'user'} qua SePay`, read: 0, created_at: now() });
+  return true;
+}
+
+app.post('/api/deposits/auto', auth, async (req, res) => {
+  try {
+    const amount = Math.floor(Number(req.body.amount || 0));
+    if (amount < 1000) return res.status(400).json({ error: 'Số tiền nạp tối thiểu 1.000đ' });
+    const code = makeSepayCode(req.user.username);
+    const qrUrl = buildSepayQr(amount, code);
+    const dep = { id: uid('d'), user_id: req.user.id, amount, content: code, proof_image: '', status: 'Chờ thanh toán', admin_note: 'Đang chờ SePay xác nhận', created_at: now(), reviewed_at: '', method: 'sepay', sepay_code: code, sepay_qr: qrUrl };
+    db.deposits.push(dep);
+    saveDb();
+    res.json({ deposit: dep, qrUrl, transferContent: code, bank: db.settings.sepayBankCode, account: db.settings.sepayAccount, accountName: db.settings.sepayAccountName });
+  } catch (e) { res.status(500).json({ error: e.message || 'Không tạo được lệnh nạp SePay' }); }
+});
+
+app.post('/api/sepay/webhook', async (req, res) => {
+  try {
+    db.sepayTransactions = db.sepayTransactions || [];
+    const payload = req.body || {};
+    console.log('SEPAY WEBHOOK RECEIVED:', JSON.stringify(payload).slice(0, 1500));
+    const { amount, content, ref, type } = extractSepayPayload(payload);
+    if (type && type.includes('out')) return res.json({ success: true, ignored: 'outgoing' });
+    if (!amount || amount <= 0) return res.json({ success: true, ignored: 'no_amount' });
+    const txKey = ref || `${amount}:${content}:${JSON.stringify(payload).slice(0,200)}`;
+    if (db.sepayTransactions.some(t => t.key === txKey)) return res.json({ success: true, duplicate: true });
+
+    const normalized = normText(content);
+    let dep = (db.deposits || [])
+      .filter(d => ['Chờ thanh toán','Chờ duyệt'].includes(String(d.status || '')) && Math.floor(Number(d.amount || 0)) === amount)
+      .find(d => d.sepay_code && normalized.includes(normText(d.sepay_code)));
+
+    if (!dep) {
+      const user = findUserBySepayContent(content);
+      if (user) {
+        dep = (db.deposits || [])
+          .filter(d => ['Chờ thanh toán','Chờ duyệt'].includes(String(d.status || '')) && d.user_id === user.id && Math.floor(Number(d.amount || 0)) === amount)
+          .sort((a,b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
+        if (!dep) {
+          dep = { id: uid('d'), user_id: user.id, amount, content, proof_image: '', status: 'Chờ thanh toán', admin_note: '', created_at: now(), reviewed_at: '', method: 'sepay', sepay_code: '', sepay_qr: '' };
+          db.deposits.push(dep);
+        }
+      }
+    }
+
+    const credited = approveDeposit(dep, txKey, payload);
+    db.sepayTransactions.push({ key: txKey, amount, content, credited, deposit_id: dep ? dep.id : '', created_at: now(), payload });
+    saveDb();
+    return res.json({ success: true, credited, deposit_id: dep ? dep.id : null });
+  } catch (e) {
+    console.error('SEPAY WEBHOOK ERROR:', e);
+    return res.status(200).json({ success: false, error: e.message || 'Webhook error' });
+  }
+});
+
 app.post('/api/deposits', auth, upload.single('proof'), async (req, res) => {
   try {
     const amount = Math.floor(Number(req.body.amount || 0));
@@ -447,7 +544,7 @@ app.patch('/api/admin/deposits/:id', auth, adminOnly, (req, res) => {
 });
 app.get('/api/admin/notifications', auth, adminOnly, (req, res) => res.json(db.notifications.sort((a,b) => b.created_at.localeCompare(a.created_at)).slice(0,100)));
 app.patch('/api/admin/notifications/read', auth, adminOnly, (req, res) => { db.notifications.forEach(n => n.read = 1); saveDb(); res.json({ ok: true }); });
-app.patch('/api/admin/settings', auth, adminOnly, (req, res) => { ['siteName','brandText','logoUrl','adUrl','themeColor','layoutMode','depositInfo','qrImage','apiBaseUrl','apiKey','apiProvider','legacyApiBaseUrl','legacyApiKey','codesimApiBaseUrl','codesimApiKey','otpTimeoutMinutes'].forEach(k => { if (req.body[k] !== undefined) db.settings[k] = String(req.body[k]); }); saveDb(); res.json(safeSettingsForUser(db.settings, true)); });
+app.patch('/api/admin/settings', auth, adminOnly, (req, res) => { ['siteName','brandText','logoUrl','adUrl','themeColor','layoutMode','depositInfo','qrImage','apiBaseUrl','apiKey','apiProvider','legacyApiBaseUrl','legacyApiKey','codesimApiBaseUrl','codesimApiKey','otpTimeoutMinutes','sepayBankCode','sepayAccount','sepayAccountName','sepayEnabled'].forEach(k => { if (req.body[k] !== undefined) db.settings[k] = String(req.body[k]); }); saveDb(); res.json(safeSettingsForUser(db.settings, true)); });
 app.get('/api/admin/sim-api/account', auth, adminOnly, async (req, res) => {
   try {
     const provider = String(req.query.provider || 'legacy');
