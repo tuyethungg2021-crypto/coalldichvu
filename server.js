@@ -485,6 +485,9 @@ app.post('/api/admin/sim-api/sync-apps', auth, adminOnly, async (req, res) => {
 
 
 // DMX shop products and orders
+function parseStockCodes(text) {
+  return String(text || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+}
 function dmxPrice(product, qty) {
   qty = Math.max(1, Math.floor(Number(qty || 1)));
   const normal = Math.max(0, Math.floor(Number(product.price || 0)));
@@ -494,8 +497,14 @@ function dmxPrice(product, qty) {
   return { unitPrice: unit, total: unit * qty };
 }
 app.get('/api/dmx/products', auth, (req, res) => {
-  const rows = (db.dmxProducts || []).filter(p => req.user.role === 'admin' || Number(p.visible) === 1)
+  let rows = (db.dmxProducts || []).filter(p => req.user.role === 'admin' || Number(p.visible) === 1)
     .sort((a,b) => String(a.category||'').localeCompare(String(b.category||'')) || String(a.name||'').localeCompare(String(b.name||'')));
+  rows = rows.map(p => {
+    const stockCodes = Array.isArray(p.stockCodes) ? p.stockCodes : [];
+    if (req.user.role === 'admin') return { ...p, stockCodes, stockCount: stockCodes.length };
+    const { stockCodes: _hidden, ...safe } = p;
+    return { ...safe, stockCount: stockCodes.length };
+  });
   res.json(rows);
 });
 app.get('/api/dmx/orders', auth, (req, res) => {
@@ -509,11 +518,17 @@ app.post('/api/dmx/orders', auth, (req, res) => {
   const quantity = Math.max(1, Math.floor(Number(req.body.quantity || 1)));
   const price = dmxPrice(product, quantity);
   if ((req.user.balance || 0) < price.total) return res.status(400).json({ error: 'Số dư không đủ để mua sản phẩm' });
+  product.stockCodes = Array.isArray(product.stockCodes) ? product.stockCodes : [];
+  let voucherCodes = [];
+  if (product.stockCodes.length > 0) {
+    if (product.stockCodes.length < quantity) return res.status(400).json({ error: `Kho voucher không đủ. Còn ${product.stockCodes.length} mã.` });
+    voucherCodes = product.stockCodes.splice(0, quantity);
+  }
   req.user.balance = Math.floor(Number(req.user.balance || 0) - price.total);
   const order = {
     id: uid('dmxo'), user_id: req.user.id, product_id: product.id,
     product_name: product.name, category: product.category || '', imageUrl: product.imageUrl || '',
-    quantity, unit_price: price.unitPrice, total: price.total,
+    quantity, unit_price: price.unitPrice, total: price.total, voucherCodes,
     status: 'Đã mua', note: String(req.body.note || ''), created_at: now()
   };
   db.dmxOrders = db.dmxOrders || [];
@@ -534,6 +549,7 @@ app.post('/api/admin/dmx/products', auth, adminOnly, (req, res) => {
     price: Math.floor(Number(req.body.price || 0)), bulkMinQty: Math.floor(Number(req.body.bulkMinQty || 0)),
     bulkPrice: Math.floor(Number(req.body.bulkPrice || 0)), visible: req.body.visible ? 1 : 0,
     description: String(req.body.description || ''), imageUrl: String(req.body.imageUrl || ''),
+    stockCodes: parseStockCodes(req.body.stockText),
     created_at: now(), updated_at: now()
   };
   if (!p.name) return res.status(400).json({ error: 'Thiếu tên sản phẩm' });
@@ -549,6 +565,10 @@ app.patch('/api/admin/dmx/products/:id', auth, adminOnly, (req, res) => {
   if (req.body.bulkMinQty !== undefined) p.bulkMinQty = Math.floor(Number(req.body.bulkMinQty || 0));
   if (req.body.bulkPrice !== undefined) p.bulkPrice = Math.floor(Number(req.body.bulkPrice || 0));
   if (req.body.visible !== undefined) p.visible = req.body.visible ? 1 : 0;
+  if (req.body.stockText !== undefined) {
+    const addCodes = parseStockCodes(req.body.stockText);
+    if (addCodes.length) p.stockCodes = (Array.isArray(p.stockCodes) ? p.stockCodes : []).concat(addCodes);
+  }
   p.updated_at = now(); saveDb(); res.json(p);
 });
 app.delete('/api/admin/dmx/products/:id', auth, adminOnly, (req, res) => {
