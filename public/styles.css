@@ -9,3 +9,5 @@ body{overflow-x:hidden}.admin-service-list{display:grid;gap:12px}.admin-service-
 .thumb{width:42px;height:42px;object-fit:cover;border-radius:10px;margin-right:8px;vertical-align:middle;border:1px solid #e5e7eb}
 .stats{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 16px}
 .codebox{white-space:pre-wrap;background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:8px;max-width:260px;margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+
+.copy-cell{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.copy-btn{white-space:nowrap}

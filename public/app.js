@@ -30,6 +30,22 @@ function toast(msg, ok=true){
   main.prepend(n);
   setTimeout(()=>n.remove(),3500);
 }
+function safeCopyValue(v){ return String(v ?? '').trim(); }
+async function copyText(v, label='Nội dung'){
+  const text = safeCopyValue(v);
+  if(!text || text === 'Chưa có'){ toast('Chưa có '+label.toLowerCase()+' để copy', false); return; }
+  try{
+    if(navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(text);
+    }else{
+      const ta=document.createElement('textarea');
+      ta.value=text; ta.setAttribute('readonly',''); ta.style.position='fixed'; ta.style.left='-9999px';
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+    }
+    toast('Đã copy '+label+': '+text);
+  }catch(e){ toast('Không copy được, hãy bôi đen và copy thủ công', false); }
+}
+function sortRentalsNewest(rows){ return [...rows].sort((a,b)=>new Date(b.rented_at||0)-new Date(a.rented_at||0)); }
 async function loadSettings(){ settings = await api('/api/settings'); document.documentElement.style.setProperty('--brand', settings.themeColor || '#2563eb'); document.body.classList.toggle('layout-compact', settings.layoutMode === 'compact'); }
 async function loadMe(){ if(!token) return; try{ const d = await api('/api/me'); me = d.user; }catch(e){ token=''; localStorage.removeItem('token'); me=null; } }
 async function boot(){ await loadSettings(); await loadMe(); if(!me) renderAuth(); else await loadPage(); }
@@ -73,9 +89,10 @@ async function renderTab(){
 }
 async function userServices(){
   services = await api('/api/services');
-  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Dịch vụ thuê sim</h2><div class="servicegrid">${services.map(s=>`<div class="svc">${s.imageUrl?`<img class="svc-img" src="${esc(s.imageUrl)}">`:''}<h3>${esc(s.name)}</h3><p class="muted">${esc(s.description||'')}</p><div class="field"><label>Nhà mạng</label><select id="carrier_${s.id}">${carrierOptions(s.network)}</select></div><div class="price">${fmt(s.price)}</div><button onclick="rent('${s.id}')">Thuê sim</button></div>`).join('')}</div></div><div class="card"><h2>Sim đang thuê</h2><div id="activeRentals"></div></div>`);
+  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Dịch vụ thuê sim</h2><div class="servicegrid">${services.map(s=>`<div class="svc">${s.imageUrl?`<img class="svc-img" src="${esc(s.imageUrl)}">`:''}<h3>${esc(s.name)}</h3><p class="muted">${esc(s.description||'')}</p><div class="field"><label>Nhà mạng</label><select id="carrier_${s.id}">${carrierOptions(s.network)}</select></div><div class="price">${fmt(s.price)}</div><button onclick="rent('${s.id}')">Thuê sim</button></div>`).join('')}</div></div><div class="card"><h2>Sim đang thuê</h2><div id="activeRentals"></div></div><div class="card"><h2>Lịch sử thuê sim</h2><p class="muted">Số thuê mới nhất nằm trên cùng, số thuê cũ hơn nằm bên dưới.</p><div id="serviceRentalHistory"></div></div>`);
   rentals = await api('/api/rentals');
-  $('#activeRentals').innerHTML = tableRentals(rentals.filter(isActiveRental));
+  $('#activeRentals').innerHTML = tableRentals(sortRentalsNewest(rentals.filter(isActiveRental)));
+  $('#serviceRentalHistory').innerHTML = tableRentals(sortRentalsNewest(rentals.filter(showInHistoryRental)));
 }
 function carrierOptions(network){ const raw=String(network||'').trim(); if(!raw) return '<option value="">Tự động</option>'; const arr=raw.split(/[,;\n]/).map(x=>x.trim()).filter(Boolean); return ['<option value="">Tự động</option>'].concat(arr.map(x=>`<option value="${esc(x)}">${esc(x)}</option>`)).join(''); }
 async function rent(id){
@@ -122,16 +139,17 @@ async function autoCheckOtpOnce(){
     otpPollCursor++;
     const d = await checkCode(r.id, true).catch(()=>null);
     const updatedRows = await api('/api/rentals').catch(()=>rows);
-    const active = updatedRows.filter(isActiveRental);
+    const active = sortRentalsNewest(updatedRows.filter(isActiveRental));
     if($('#activeRentals')) $('#activeRentals').innerHTML = tableRentals(active);
+    if($('#serviceRentalHistory')) $('#serviceRentalHistory').innerHTML = tableRentals(sortRentalsNewest(updatedRows.filter(showInHistoryRental)));
     if(d?.rental?.otp_code){ toast('Đã nhận OTP cho số '+(d.rental.phone_number||'')+': '+d.rental.otp_code); }
     if(d?.rental?.refunded){ await loadMe(); me = (await api('/api/me')).user; toast(d.rental.note || 'Đã tự hoàn tiền vì hết thời gian chờ OTP'); }
   }catch(e){
     // Không spam lỗi trong quá trình tự kiểm tra; người dùng vẫn có thể bấm kiểm tra thủ công.
   }finally{ otpPollBusy = false; }
 }
-function tableRentals(rows){ if(!rows.length) return '<p class="muted">Chưa có dữ liệu.</p>'; return `<div class="tablewrap"><table class="table"><tr><th>Dịch vụ</th><th>Nhà mạng</th><th>Số sim</th><th>Giá</th><th>Trạng thái</th><th>OTP/SMS</th><th>Thời gian</th><th>Thao tác</th></tr>${rows.map(r=>`<tr><td>${esc(r.service_name)}</td><td>${esc(r.network)}</td><td><b>${esc(r.phone_number)}</b></td><td>${fmt(r.price)}</td><td><span class="badge">${esc(r.status)}</span><br><small>${esc(r.note||'')}</small>${isWaitingOtp(r)?'<br><small class="muted">Đang tự động lấy OTP mỗi 8 giây...</small>':justReceivedOtp(r)?'<br><small class="muted">OTP sẽ nằm ở đây 2 phút trước khi chuyển vào lịch sử.</small>':''}</td><td><b>${esc(r.otp_code||'Chưa có')}</b><br><small>${esc(r.sms||'')}</small></td><td>${date(r.rented_at)}</td><td>${r.external_id&&isWaitingOtp(r)?`<button class="small ok" onclick="checkCode('${r.id}')">Kiểm tra ngay</button>`:''} ${r.service_id?`<button class="small" onclick="rent('${r.service_id}')">Thuê lại</button>`:''}</td></tr>`).join('')}</table></div>`; }
-async function userHistory(){ rentals=await api('/api/rentals'); dmxOrders=await api('/api/dmx/orders').catch(()=>[]); $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Lịch sử thuê sim</h2>${tableRentals(rentals.filter(showInHistoryRental))}</div><div class="card"><h2>Lịch sử mua DMX</h2>${tableDmxOrders(dmxOrders,false)}</div>`); }
+function tableRentals(rows){ if(!rows.length) return '<p class="muted">Chưa có dữ liệu.</p>'; return `<div class="tablewrap"><table class="table"><tr><th>Dịch vụ</th><th>Nhà mạng</th><th>Số sim</th><th>Giá</th><th>Trạng thái</th><th>OTP/SMS</th><th>Thời gian</th><th>Thao tác</th></tr>${rows.map(r=>{ const phone=esc(r.phone_number||''); const otp=esc(r.otp_code||'Chưa có'); return `<tr><td>${esc(r.service_name)}</td><td>${esc(r.network)}</td><td><div class="copy-cell"><b>${phone}</b><button class="small secondary copy-btn" onclick="copyText('${phone}','SĐT')">Copy SĐT</button></div></td><td>${fmt(r.price)}</td><td><span class="badge">${esc(r.status)}</span><br><small>${esc(r.note||'')}</small>${isWaitingOtp(r)?'<br><small class="muted">Đang tự động lấy OTP mỗi 8 giây...</small>':justReceivedOtp(r)?'<br><small class="muted">OTP sẽ nằm ở đây 2 phút trước khi chuyển vào lịch sử.</small>':''}</td><td><div class="copy-cell"><b>${otp}</b><button class="small secondary copy-btn" onclick="copyText('${otp}','OTP')">Copy OTP</button></div><small>${esc(r.sms||'')}</small></td><td>${date(r.rented_at)}</td><td>${r.external_id&&isWaitingOtp(r)?`<button class="small ok" onclick="checkCode('${r.id}')">Kiểm tra ngay</button>`:''} ${r.service_id?`<button class="small" onclick="rent('${r.service_id}')">Thuê lại</button>`:''}</td></tr>` }).join('')}</table></div>`; }
+async function userHistory(){ rentals=await api('/api/rentals'); dmxOrders=await api('/api/dmx/orders').catch(()=>[]); $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Lịch sử thuê sim</h2>${tableRentals(sortRentalsNewest(rentals.filter(showInHistoryRental)))}</div><div class="card"><h2>Lịch sử mua DMX</h2>${tableDmxOrders(dmxOrders,false)}</div>`); }
 
 async function userDmx(){
   dmxProducts = await api('/api/dmx/products');
