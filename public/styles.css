@@ -11,3 +11,4 @@ body{overflow-x:hidden}.admin-service-list{display:grid;gap:12px}.admin-service-
 .codebox{white-space:pre-wrap;background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:8px;max-width:260px;margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
 
 .copy-cell{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.copy-btn{white-space:nowrap}
+.desc-box{margin:8px 0 10px}.live-desc{white-space:pre-line;margin:0 0 8px}.copy-desc-btn{margin-bottom:8px}

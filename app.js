@@ -7,6 +7,8 @@ let services = [], rentals = [], deposits = [], users = [], adminRentals = [], a
 let otpPollTimer = null;
 let otpPollBusy = false;
 let otpPollCursor = 0;
+let descPollTimer = null;
+let descPollBusy = false;
 
 const $ = s => document.querySelector(s);
 const app = $('#app');
@@ -45,6 +47,14 @@ async function copyText(v, label='Nội dung'){
     toast('Đã copy '+label+': '+text);
   }catch(e){ toast('Không copy được, hãy bôi đen và copy thủ công', false); }
 }
+function copyElementText(id, label='Nội dung'){
+  const el = document.getElementById(id);
+  copyText(el ? el.textContent : '', label);
+}
+function setTextIfChanged(id, text){
+  const el = document.getElementById(id);
+  if(el && el.textContent !== String(text || '')) el.textContent = String(text || '');
+}
 function sortRentalsNewest(rows){ return [...rows].sort((a,b)=>new Date(b.rented_at||0)-new Date(a.rented_at||0)); }
 async function loadSettings(){ settings = await api('/api/settings'); document.documentElement.style.setProperty('--brand', settings.themeColor || '#2563eb'); document.body.classList.toggle('layout-compact', settings.layoutMode === 'compact'); }
 async function loadMe(){ if(!token) return; try{ const d = await api('/api/me'); me = d.user; }catch(e){ token=''; localStorage.removeItem('token'); me=null; } }
@@ -65,9 +75,10 @@ async function loadPage(){
   if(settings.adUrl) $('.main').insertAdjacentHTML('beforeend', `<img class="ad" src="${esc(settings.adUrl)}">`);
   await renderTab();
   startOtpAutoPolling();
+  startLiveDescriptionPolling();
 }
 async function setTab(t){ tab=t; await loadPage(); }
-function logout(){ stopOtpAutoPolling(); localStorage.removeItem('token'); token=''; me=null; renderAuth(); }
+function logout(){ stopOtpAutoPolling(); stopLiveDescriptionPolling(); localStorage.removeItem('token'); token=''; me=null; renderAuth(); }
 function renderAuth(){
   app.innerHTML = `<div class="wrap auth card"><h2>${esc(settings.siteName||'Có All Dịch Vụ')}</h2><div id="msg"></div><div class="field"><label>Tài khoản</label><input id="username" placeholder="Nhập tài khoản"></div><div class="field"><label>Mật khẩu</label><input id="password" type="password" placeholder="Nhập mật khẩu"></div><div class="flex"><button onclick="login()">Đăng nhập</button><button class="secondary" onclick="register()">Đăng ký user</button></div></div>`;
 }
@@ -89,7 +100,7 @@ async function renderTab(){
 }
 async function userServices(){
   services = await api('/api/services');
-  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Dịch vụ thuê sim</h2><div class="servicegrid">${services.map(s=>`<div class="svc">${s.imageUrl?`<img class="svc-img" src="${esc(s.imageUrl)}">`:''}<h3>${esc(s.name)}</h3><p class="muted">${esc(s.description||'')}</p><div class="field"><label>Nhà mạng</label><select id="carrier_${s.id}">${carrierOptions(s.network)}</select></div><div class="price">${fmt(s.price)}</div><button onclick="rent('${s.id}')">Thuê sim</button></div>`).join('')}</div></div><div class="card"><h2>Sim đang thuê</h2><div id="activeRentals"></div></div><div class="card"><h2>Lịch sử thuê sim</h2><p class="muted">Số thuê mới nhất nằm trên cùng, số thuê cũ hơn nằm bên dưới.</p><div id="serviceRentalHistory"></div></div>`);
+  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Dịch vụ thuê sim</h2><div class="servicegrid">${services.map(s=>`<div class="svc">${s.imageUrl?`<img class="svc-img" src="${esc(s.imageUrl)}">`:''}<h3>${esc(s.name)}</h3><div class="desc-box"><p id="svc_desc_${s.id}" class="muted live-desc">${esc(s.description||'')}</p><button class="small secondary copy-desc-btn" onclick="copyElementText('svc_desc_${s.id}','mô tả')">Copy mô tả</button></div><div class="field"><label>Nhà mạng</label><select id="carrier_${s.id}">${carrierOptions(s.network)}</select></div><div class="price">${fmt(s.price)}</div><button onclick="rent('${s.id}')">Thuê sim</button></div>`).join('')}</div></div><div class="card"><h2>Sim đang thuê</h2><div id="activeRentals"></div></div><div class="card"><h2>Lịch sử thuê sim</h2><p class="muted">Số thuê mới nhất nằm trên cùng, số thuê cũ hơn nằm bên dưới.</p><div id="serviceRentalHistory"></div></div>`);
   rentals = await api('/api/rentals');
   $('#activeRentals').innerHTML = tableRentals(sortRentalsNewest(rentals.filter(isActiveRental)));
   $('#serviceRentalHistory').innerHTML = tableRentals(sortRentalsNewest(rentals.filter(showInHistoryRental)));
@@ -148,6 +159,30 @@ async function autoCheckOtpOnce(){
     // Không spam lỗi trong quá trình tự kiểm tra; người dùng vẫn có thể bấm kiểm tra thủ công.
   }finally{ otpPollBusy = false; }
 }
+function stopLiveDescriptionPolling(){ if(descPollTimer){ clearInterval(descPollTimer); descPollTimer=null; } }
+function startLiveDescriptionPolling(runNow=false){
+  stopLiveDescriptionPolling();
+  if(!token || !me || !['services','dmx'].includes(tab)) return;
+  descPollTimer = setInterval(refreshLiveDescriptionsOnce, 8000);
+  if(runNow) setTimeout(refreshLiveDescriptionsOnce, 1200);
+}
+async function refreshLiveDescriptionsOnce(){
+  if(descPollBusy || !token || !me || !['services','dmx'].includes(tab)) return;
+  descPollBusy = true;
+  try{
+    if(tab === 'services'){
+      const rows = await api('/api/services');
+      services = rows;
+      rows.forEach(s => setTextIfChanged('svc_desc_'+s.id, s.description || ''));
+    }else if(tab === 'dmx'){
+      const rows = await api('/api/dmx/products');
+      dmxProducts = rows;
+      rows.forEach(p => setTextIfChanged('dmx_desc_'+p.id, p.description || ''));
+    }
+  }catch(e){
+    // Không hiện lỗi để tránh làm phiền khách khi đang xem trang.
+  }finally{ descPollBusy = false; }
+}
 function tableRentals(rows){ if(!rows.length) return '<p class="muted">Chưa có dữ liệu.</p>'; return `<div class="tablewrap"><table class="table"><tr><th>Số sim</th><th>OTP/SMS</th><th>Dịch vụ</th><th>Nhà mạng</th><th>Giá</th><th>Trạng thái</th><th>Thời gian</th><th>Thao tác</th></tr>${rows.map(r=>{ const phone=esc(r.phone_number||''); const otp=esc(r.otp_code||'Chưa có'); return `<tr><td><div class="copy-cell"><b>${phone}</b><button class="small secondary copy-btn" onclick="copyText('${phone}','SĐT')">Copy SĐT</button></div></td><td><div class="copy-cell"><b>${otp}</b><button class="small secondary copy-btn" onclick="copyText('${otp}','OTP')">Copy OTP</button></div><small>${esc(r.sms||'')}</small></td><td>${esc(r.service_name)}</td><td>${esc(r.network)}</td><td>${fmt(r.price)}</td><td><span class="badge">${esc(r.status)}</span><br><small>${esc(r.note||'')}</small>${isWaitingOtp(r)?'<br><small class="muted">Đang tự động lấy OTP mỗi 8 giây, không tải lại trang.</small>':justReceivedOtp(r)?'<br><small class="muted">OTP sẽ nằm ở đây 2 phút trước khi chuyển vào lịch sử.</small>':''}</td><td>${date(r.rented_at)}</td><td>${r.external_id&&isWaitingOtp(r)?`<button class="small ok" onclick="checkCode('${r.id}')">Kiểm tra ngay</button>`:''} ${r.service_id?`<button class="small" onclick="rent('${r.service_id}')">Thuê lại</button>`:''}</td></tr>` }).join('')}</table></div>`; }
 async function userHistory(){ rentals=await api('/api/rentals'); dmxOrders=await api('/api/dmx/orders').catch(()=>[]); $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Lịch sử thuê sim</h2>${tableRentals(sortRentalsNewest(rentals.filter(showInHistoryRental)))}</div><div class="card"><h2>Lịch sử mua DMX</h2>${tableDmxOrders(dmxOrders,false)}</div>`); }
 
@@ -162,7 +197,7 @@ function renderDmxProducts(){
   const q=($('#dmxSearch')?.value||'').toLowerCase().trim();
   const cat=$('#dmxCategory')?.value||'';
   const rows=dmxProducts.filter(p=>(!q||[p.name,p.category,p.description].join(' ').toLowerCase().includes(q))&&(!cat||p.category===cat));
-  $('#dmxProductList').innerHTML = rows.length ? `<div class="servicegrid">${rows.map(p=>`<div class="svc">${p.imageUrl?`<img class="svc-img" src="${esc(p.imageUrl)}">`:''}<h3>${esc(p.name)}</h3><p class="muted">${esc(p.category||'Chưa phân loại')}</p><p>${esc(p.description||'')}</p><div class="price">${fmt(p.price)}</div>${p.bulkMinQty&&p.bulkPrice?`<p class="muted">Mua từ ${p.bulkMinQty}: ${fmt(p.bulkPrice)}/sp</p>`:''}<div class="field"><label>Số lượng</label><input id="dmxQty_${p.id}" type="number" min="1" value="1" oninput="updateDmxTotal('${p.id}')"></div><p id="dmxTotal_${p.id}" class="notice">Tổng: ${fmt(p.price)}</p><button onclick="buyDmx('${p.id}')">Mua sản phẩm</button></div>`).join('')}</div>` : '<p class="muted">Không tìm thấy sản phẩm.</p>';
+  $('#dmxProductList').innerHTML = rows.length ? `<div class="servicegrid">${rows.map(p=>`<div class="svc">${p.imageUrl?`<img class="svc-img" src="${esc(p.imageUrl)}">`:''}<h3>${esc(p.name)}</h3><p class="muted">${esc(p.category||'Chưa phân loại')}</p><div class="desc-box"><p id="dmx_desc_${p.id}" class="live-desc">${esc(p.description||'')}</p><button class="small secondary copy-desc-btn" onclick="copyElementText('dmx_desc_${p.id}','mô tả')">Copy mô tả</button></div><div class="price">${fmt(p.price)}</div>${p.bulkMinQty&&p.bulkPrice?`<p class="muted">Mua từ ${p.bulkMinQty}: ${fmt(p.bulkPrice)}/sp</p>`:''}<div class="field"><label>Số lượng</label><input id="dmxQty_${p.id}" type="number" min="1" value="1" oninput="updateDmxTotal('${p.id}')"></div><p id="dmxTotal_${p.id}" class="notice">Tổng: ${fmt(p.price)}</p><button onclick="buyDmx('${p.id}')">Mua sản phẩm</button></div>`).join('')}</div>` : '<p class="muted">Không tìm thấy sản phẩm.</p>';
   rows.forEach(p=>updateDmxTotal(p.id));
 }
 function updateDmxTotal(id){ const p=dmxProducts.find(x=>x.id===id); if(!p||!$('#dmxTotal_'+id)) return; const q=Math.max(1,Number($('#dmxQty_'+id)?.value||1)); $('#dmxTotal_'+id).textContent='Tổng: '+fmt(dmxUnitPrice(p,q)*q); }
@@ -205,7 +240,7 @@ function renderServiceTable(){ const q=($('#serviceSearch')?.value||'').toLowerC
 function tableServices(rows){ if(!rows.length) return '<p class="muted">Không tìm thấy dịch vụ.</p>'; return `<div class="admin-service-list">${rows.map(s=>`<div class="admin-service-card"><div class="admin-service-grid"><div><label>Nguồn API</label><select id="prov_${s.id}"><option value="legacy" ${s.provider!=='codesim'?'selected':''}>Legacy</option><option value="codesim" ${s.provider==='codesim'?'selected':''}>CodeSim</option></select></div><div><label>Tên</label><input id="n_${s.id}" value="${esc(s.name)}"></div><div><label>Service ID API</label><input id="app_${s.id}" value="${esc(s.external_app_id||'')}"></div><div><label>Ảnh sản phẩm</label>${s.imageUrl?`<a href="${esc(s.imageUrl)}" target="_blank">Xem ảnh</a>`:'<span class="muted">Chưa có</span>'}<input id="img_${s.id}" type="hidden" value="${esc(s.imageUrl||'')}"><input id="file_${s.id}" type="file" accept="image/*"></div><div><label>Nhà mạng / Network ID</label><input id="net_${s.id}" value="${esc(s.network)}"></div><div><label>Giá bán</label><input id="p_${s.id}" type="number" value="${s.price}"></div><div><label>Giá API</label><input id="cost_${s.id}" type="number" value="${s.api_cost||0}"></div><div><label>Hiển thị</label><div class="toggle-line"><input id="v_${s.id}" type="checkbox" ${s.visible?'checked':''}><span>${s.visible?'Đang hiện':'Đang ẩn'}</span></div></div><div class="wide"><label>Mô tả</label><input id="d_${s.id}" value="${esc(s.description||'')}"></div><div class="admin-actions"><button class="small" onclick="saveService('${s.id}')">Lưu</button><button class="small danger" onclick="delService('${s.id}')">Xóa</button></div></div></div>`).join('')}</div>`; }
 async function hideAllServices(){ if(!confirm('Ẩn toàn bộ dịch vụ? User sẽ không thấy dịch vụ nào cho tới khi admin bật lại.')) return; await api('/api/admin/services/hide-all',{method:'POST',body:JSON.stringify({})}); toast('Đã ẩn tất cả dịch vụ'); services=await api('/api/services'); renderServiceTable(); }
 async function addService(){ try{ let imageUrl=''; if($('#sImage')?.files[0]) imageUrl=await uploadFile($('#sImage')); await api('/api/admin/services',{method:'POST',body:JSON.stringify({name:$('#sName').value,external_app_id:$('#sAppId').value,network:$('#sNet').value,price:$('#sPrice').value,description:$('#sDesc').value,imageUrl,visible:false})}); await loadPage(); }catch(e){ toast(e.message,false); } }
-async function saveService(id){ let imageUrl=$('#img_'+id)?.value||''; if($('#file_'+id)?.files[0]) imageUrl=await uploadFile($('#file_'+id)); await api('/api/admin/services/'+id,{method:'PATCH',body:JSON.stringify({provider:$('#prov_'+id)?.value||'legacy',name:$('#n_'+id).value,external_app_id:$('#app_'+id).value,network:$('#net_'+id).value,price:$('#p_'+id).value,api_cost:$('#cost_'+id).value,visible:$('#v_'+id).checked,description:$('#d_'+id).value,imageUrl})}); toast('Đã lưu dịch vụ'); await loadPage(); }
+async function saveService(id){ let imageUrl=$('#img_'+id)?.value||''; if($('#file_'+id)?.files[0]) imageUrl=await uploadFile($('#file_'+id)); await api('/api/admin/services/'+id,{method:'PATCH',body:JSON.stringify({provider:$('#prov_'+id)?.value||'legacy',name:$('#n_'+id).value,external_app_id:$('#app_'+id).value,network:$('#net_'+id).value,price:$('#p_'+id).value,api_cost:$('#cost_'+id).value,visible:$('#v_'+id).checked,description:$('#d_'+id).value,imageUrl})}); toast('Đã lưu dịch vụ'); services=await api('/api/services'); renderServiceTable(); }
 async function adminApi(){
   $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Admin - API thuê sim</h2><p class="muted">Bên trên là API Legacy chaycodeso3.com, bên dưới là API CodeSim. Khi đồng bộ, hệ thống gọi cả 2 API, dịch vụ mới mặc định ẩn. Khi user thuê, hệ thống tự gọi đúng API theo nguồn của dịch vụ.</p>
   <div class="card soft"><h3>API 1 - Legacy / chaycodeso3.com</h3><div class="field"><label>API URL Legacy</label><input id="legacyApiBaseUrl" value="${esc(settings.legacyApiBaseUrl||settings.apiBaseUrl||'https://chaycodeso3.com/api')}"></div><div class="field"><label>API key Legacy</label><input id="legacyApiKey" value="${esc(settings.legacyApiKey||settings.apiKey||'')}"></div><button class="secondary" onclick="testApiAccount('legacy')">Test Legacy</button><p class="muted">Key hiện tại: ${esc(settings.legacyApiKeyMasked||settings.apiKeyMasked||'Chưa cài')}</p></div>
