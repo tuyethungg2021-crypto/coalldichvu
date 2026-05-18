@@ -545,8 +545,26 @@ app.delete('/api/admin/users/:id', auth, adminOnly, (req, res) => {
 });
 
 app.post('/api/admin/services', auth, adminOnly, (req, res) => {
-  const s = { id: uid('s'), provider: String(req.body.provider || 'legacy'), name: String(req.body.name || '').trim(), network: String(req.body.network || '').trim(), price: Math.floor(Number(req.body.price || 0)), visible: req.body.visible ? 1 : 0, description: String(req.body.description || ''), imageUrl: String(req.body.imageUrl || ''), external_app_id: String(req.body.external_app_id || '').trim(), api_cost: Math.floor(Number(req.body.api_cost || 0)), created_at: now(), updated_at: now() };
-  if (!s.name) return res.status(400).json({ error: 'Thiếu tên dịch vụ' }); db.services.push(s); saveDb(); res.json(s);
+  const serviceType = String(req.body.service_type || req.body.type || 'sim').trim().toLowerCase() === 'highlands' ? 'highlands' : 'sim';
+  const s = {
+    id: uid('s'),
+    provider: String(req.body.provider || 'legacy'),
+    service_type: serviceType,
+    name: String(req.body.name || '').trim(),
+    network: String(req.body.network || '').trim(),
+    price: Math.floor(Number(req.body.price || 0)),
+    visible: req.body.visible ? 1 : 0,
+    description: String(req.body.description || ''),
+    imageUrl: String(req.body.imageUrl || ''),
+    external_app_id: String(req.body.external_app_id || '').trim(),
+    api_cost: Math.floor(Number(req.body.api_cost || 0)),
+    created_at: now(),
+    updated_at: now()
+  };
+  if (!s.name) return res.status(400).json({ error: 'Thiếu tên dịch vụ' });
+  db.services.push(s);
+  saveDb();
+  res.json(s);
 });
 app.post('/api/admin/services/hide-all', auth, adminOnly, (req, res) => {
   db.services.forEach(s => { s.visible = 0; s.updated_at = now(); });
@@ -557,6 +575,10 @@ app.post('/api/admin/services/hide-all', auth, adminOnly, (req, res) => {
 app.patch('/api/admin/services/:id', auth, adminOnly, (req, res) => {
   const s = db.services.find(x => x.id === req.params.id); if (!s) return res.status(404).json({ error: 'Không tìm thấy dịch vụ' });
   ['name','network','description','external_app_id','imageUrl','provider'].forEach(k => { if (req.body[k] !== undefined) s[k] = String(req.body[k]); });
+  if (req.body.service_type !== undefined || req.body.type !== undefined) {
+    const serviceType = String(req.body.service_type ?? req.body.type ?? 'sim').trim().toLowerCase();
+    s.service_type = serviceType === 'highlands' ? 'highlands' : 'sim';
+  }
   if (req.body.price !== undefined) s.price = Math.floor(Number(req.body.price || 0));
   if (req.body.visible !== undefined) s.visible = req.body.visible ? 1 : 0;
   if (req.body.api_cost !== undefined) s.api_cost = Math.floor(Number(req.body.api_cost || 0));
@@ -575,6 +597,7 @@ app.post('/api/admin/highlands-stock/import', auth, adminOnly, (req, res) => {
   const serviceId = String(req.body.service_id || '').trim();
   const service = db.services.find(s => s.id === serviceId);
   if (!service) return res.status(404).json({ error: 'Không tìm thấy dịch vụ để nhập kho' });
+  if (String(service.service_type || 'sim') !== 'highlands') return res.status(400).json({ error: 'Dịch vụ này chưa được đặt loại Highlands. Vào Dịch vụ admin -> Loại -> Highlands rồi bấm Lưu.' });
   const raw = String(req.body.phones || '');
   const phones = raw.split(/[\s,;]+/).map(normalizePhoneNumber).filter(x => /^0\d{8,10}$/.test(x));
   let added = 0, skipped = 0;
