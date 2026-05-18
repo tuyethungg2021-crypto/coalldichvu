@@ -1,2 +1,40 @@
-<!doctype html>
-<html lang="vi"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Admin - Có All Dịch Vụ</title><link rel="stylesheet" href="/styles.css"></head><body><div id="app"></div><script src="/app.js"></script><script>setTimeout(function(){ if(window.me && me.role==='admin'){ window.tab='admin_services'; loadPage(); } }, 500);</script></body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Admin - Lịch Sử</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<h2>Admin - Tất cả lịch sử thuê</h2>
+
+<!-- Nhập API Key -->
+<div style="margin-bottom: 10px;">
+  <label>API Key chaycodeso3: </label>
+  <input type="text" id="apiKeyInput" placeholder="Nhập API Key">
+  <button onclick="loadAdminHistory()">Tải Lịch Sử</button>
+</div>
+
+<!-- Bảng lịch sử -->
+<table border="1">
+  <thead>
+    <tr>
+      <th>User</th>
+      <th>Dịch vụ</th>
+      <th>Nhà mạng</th>
+      <th>Số sim</th>
+      <th>Giá</th>
+      <th>Trạng thái</th>
+      <th>OTP</th>
+      <th>Thời gian</th>
+    </tr>
+  </thead>
+  <tbody id="historyTableBody">
+    <!-- Dữ liệu JS sẽ chèn vào đây -->
+  </tbody>
+</table>
+
+<script src="app.js"></script>
+</body>
+</html>
