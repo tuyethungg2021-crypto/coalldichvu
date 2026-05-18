@@ -1,4 +1,4 @@
-// --- Hàm tải Lịch Sử Admin theo API Key ---
+// --- Hàm load Lịch Sử Admin theo API Key ---
 async function loadAdminHistory() {
     const apiKey = document.getElementById('apiKeyInput').value.trim();
     if (!apiKey) {
@@ -16,7 +16,7 @@ async function loadAdminHistory() {
         }
 
         const tableBody = document.getElementById('historyTableBody');
-        tableBody.innerHTML = ''; // Xóa dữ liệu cũ
+        tableBody.innerHTML = '';
 
         result.data.forEach(item => {
             const row = document.createElement('tr');
@@ -37,6 +37,3 @@ async function loadAdminHistory() {
         alert("Lỗi kết nối server");
     }
 }
-
-// --- Các JS khác của bạn vẫn giữ nguyên ---
-// Ví dụ: quản lý tab admin, click, filter khác...
