@@ -704,7 +704,14 @@ app.delete('/api/admin/highlands-stock/:id', auth, adminOnly, (req, res) => {
   saveDb(); res.json({ ok: true });
 });
 
-app.get('/api/admin/rentals', auth, adminOnly, async (req, res) => { await processExpiredRentals(); res.json(db.rentals.map(r => ({ ...r, username: (db.users.find(u => u.id === r.user_id) || {}).username || 'unknown' })).sort((a,b) => b.rented_at.localeCompare(a.rented_at))); });
+app.get('/api/admin/rentals', auth, adminOnly, async (req, res) => {
+    await processExpiredRentals();
+    // Trả toàn bộ lịch sử thuê sim, bao gồm tất cả key chaycodeso3, sắp xếp mới nhất trước
+    res.json(db.rentals.map(r => ({
+        ...r,
+        username: (db.users.find(u => u.id === r.user_id) || {}).username || 'unknown'
+    })).sort((a,b) => b.rented_at.localeCompare(a.rented_at)));
+});
 app.patch('/api/admin/rentals/:id', auth, adminOnly, (req, res) => {
   const r = db.rentals.find(x => x.id === req.params.id); if (!r) return res.status(404).json({ error: 'Không tìm thấy lượt thuê' });
   ['status','otp_code','note','ended_at'].forEach(k => { if (req.body[k] !== undefined) r[k] = String(req.body[k]); }); saveDb(); res.json(r);
