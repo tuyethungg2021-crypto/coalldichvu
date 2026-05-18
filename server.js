@@ -120,7 +120,29 @@ async function migrate() {
       ['Telegram', 'MobiFone', 3500, 'Thuê sim nhận OTP Telegram'],
       ['Shopee', 'Vietnamobile', 2000, 'Thuê sim nhận OTP Shopee'],
       ['Google/Gmail', 'Viettel', 4000, 'Thuê sim nhận OTP Google']
-    ].forEach(s => db.services.push({ id: uid('s'), name: s[0], network: s[1], price: s[2], visible: 0, description: s[3], imageUrl: '', created_at: now(), updated_at: now() }));
+    ].forEach(s => db.services.push({ id: uid('s'), name: s[0], network: s[1], price: s[2], visible: 0, description: s[3], imageUrl: '', service_type: 'sim', provider: 'legacy', external_app_id: '', api_cost: 0, created_at: now(), updated_at: now() }));
+    changed = true;
+  }
+
+  // Luôn tạo sẵn sản phẩm ACC Highlands nếu chưa có, kể cả database đã có dịch vụ cũ.
+  // Service ID mặc định 1432 có thể sửa lại trong Admin -> Dịch vụ nếu API đổi ID.
+  const hasAccHighlands = (db.services || []).some(s => String(s.name || '').trim().toLowerCase() === 'acc highlands');
+  if (!hasAccHighlands) {
+    db.services.push({
+      id: uid('s'),
+      provider: 'legacy',
+      service_type: 'highlands',
+      name: 'ACC Highlands',
+      network: '',
+      price: 5000,
+      visible: 1,
+      description: 'ACC Highlands: admin nhập kho số trước, hệ thống thuê lại đúng số trong lịch sử dịch vụ đã thuê rồi chờ OTP.',
+      imageUrl: '',
+      external_app_id: '1432',
+      api_cost: 1,
+      created_at: now(),
+      updated_at: now()
+    });
     changed = true;
   }
   if (changed) saveDb();
@@ -307,6 +329,9 @@ async function processExpiredRentals() {
 function normalizePhoneNumber(v) {
   let x = String(v || '').trim().replace(/[^0-9]/g, '');
   if (x.startsWith('84') && x.length >= 11) x = '0' + x.slice(2);
+  // API chaycodeso3 thường trả Number không có số 0 đầu, ví dụ 812119032.
+  // Chuẩn hóa về 0812119032 để so đúng với số admin nhập trong kho.
+  if (/^[35789]\d{8}$/.test(x)) x = '0' + x;
   return x;
 }
 function getHighlandsAvailable(serviceId) {
@@ -405,11 +430,14 @@ app.post('/api/rentals', auth, async (req, res) => {
             continue;
           }
           const parsed = normalizeRentResult(provider, out);
-          if (!parsed.phone || !parsed.otpId || normalizePhoneNumber(parsed.phone) !== normalizePhoneNumber(tryPhone)) {
-            markHighlandsStock(stock.id, 'hold', { note: 'API trả sai số hoặc thiếu OTP ID. Raw: ' + JSON.stringify(out).slice(0, 350), held_at: now() });
+          // Highlands dùng chức năng thuê lại đúng số trong kho. API legacy trả Id + Number
+          // (Id này dùng để check code), không nhất thiết có field otpId riêng.
+          const samePhone = normalizePhoneNumber(parsed.phone) === normalizePhoneNumber(tryPhone);
+          if (!parsed.phone || !parsed.otpId || !samePhone) {
+            markHighlandsStock(stock.id, 'hold', { note: 'API không thuê lại đúng số trong kho. Cần kiểm tra lịch sử hoàn thành của số này. Raw: ' + JSON.stringify(out).slice(0, 350), held_at: now() });
             continue;
           }
-          pickedStock = stock; wantedPhone = tryPhone; apiResult = out; result = parsed.raw; phone = parsed.phone; otpId = parsed.otpId; simId = parsed.simId;
+          pickedStock = stock; wantedPhone = tryPhone; apiResult = out; result = parsed.raw; phone = parsed.phone; otpId = parsed.otpId; simId = parsed.simId || parsed.otpId;
           break;
         } catch (err) {
           markHighlandsStock(stock.id, 'hold', { note: 'Lỗi API khi thuê lại: ' + (err.message || err), held_at: now() });
@@ -438,7 +466,7 @@ app.post('/api/rentals', auth, async (req, res) => {
       status: 'Đang chờ code', rented_at: now(), ended_at: '', otp_code: '', sms: '', note: apiResult.message || apiResult.Msg || ''
     };
     db.rentals.push(rental);
-    if (pickedStock) markHighlandsStock(pickedStock.id, 'hold', { rental_id: rental.id, user_id: req.user.id, held_at: now(), last_otp_id: String(otpId || ''), note: 'Đang chờ OTP tối đa ' + getOtpTimeoutMinutes() + ' phút' });
+    if (pickedStock) markHighlandsStock(pickedStock.id, 'hold', { rental_id: rental.id, user_id: req.user.id, held_at: now(), last_otp_id: String(otpId || ''), note: 'Đã thuê lại đúng số, đang chờ OTP tối đa ' + getOtpTimeoutMinutes() + ' phút' });
     saveDb();
     res.json({ rental, user: cleanUser(req.user), api: apiResult });
   } catch (e) { res.status(500).json({ error: e.message || 'Không gọi được API thuê sim' }); }
@@ -699,9 +727,36 @@ app.patch('/api/admin/highlands-stock/:id', auth, adminOnly, (req, res) => {
   if (req.body.note !== undefined) item.note = String(req.body.note || '');
   item.updated_at = now(); saveDb(); res.json(item);
 });
+app.post('/api/admin/highlands-stock/bulk-delete', auth, adminOnly, (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.map(String) : [];
+  const serviceId = String(req.body.service_id || '').trim();
+  const status = String(req.body.status || '').trim();
+  const deleteAll = !!req.body.delete_all;
+  const before = (db.highlandsStock || []).length;
+  db.highlandsStock = (db.highlandsStock || []).filter(x => {
+    if (ids.length) return !ids.includes(String(x.id));
+    if (serviceId && String(x.service_id) !== serviceId) return true;
+    if (status && String(x.status || 'free') !== status) return true;
+    if (deleteAll || serviceId || status) return false;
+    return true;
+  });
+  const deleted = before - (db.highlandsStock || []).length;
+  saveDb();
+  res.json({ ok: true, deleted });
+});
+
 app.delete('/api/admin/highlands-stock/:id', auth, adminOnly, (req, res) => {
   db.highlandsStock = (db.highlandsStock || []).filter(x => x.id !== req.params.id);
   saveDb(); res.json({ ok: true });
+});
+
+app.get('/api/admin/highlands-orders', auth, adminOnly, async (req, res) => {
+  await processExpiredRentals();
+  const rows = (db.rentals || [])
+    .filter(r => String(r.service_type || '').toLowerCase() === 'highlands')
+    .map(r => ({ ...r, username: (db.users.find(u => u.id === r.user_id) || {}).username || 'unknown' }))
+    .sort((a,b) => String(b.rented_at || '').localeCompare(String(a.rented_at || '')));
+  res.json(rows);
 });
 
 app.get('/api/admin/rentals', auth, adminOnly, async (req, res) => { await processExpiredRentals(); res.json(db.rentals.map(r => ({ ...r, username: (db.users.find(u => u.id === r.user_id) || {}).username || 'unknown' })).sort((a,b) => b.rented_at.localeCompare(a.rented_at))); });
