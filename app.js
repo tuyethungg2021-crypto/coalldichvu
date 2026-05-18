@@ -268,3 +268,35 @@ async function adminApprove(){ adminDeposits=await api('/api/admin/deposits'); $
 async function reviewDeposit(id,status){ await api('/api/admin/deposits/'+id,{method:'PATCH',body:JSON.stringify({status,admin_note:$('#note_'+id).value})}); toast('Đã cập nhật nạp tiền'); await loadMe(); await loadPage(); }
 async function markRead(){ await api('/api/admin/notifications/read',{method:'PATCH',body:JSON.stringify({})}); await loadPage(); }
 boot();
+// ===== Tab Hailen - API Key =====
+const hailenTabHTML = `
+<div id="hailen-tab" style="padding:15px; border:1px solid #ccc; margin-top:10px;">
+  <h3>User Hailen - API OTP24h</h3>
+  <p>API Key riêng của bạn: <strong>248c26ea0cd1371009db5dd443339ca1</strong></p>
+  <p>Cách gọi API trực tiếp:</p>
+  <pre>GET https://yourweb.onrender.com/api/hailen/history?user=hailen&key=248c26ea0cd1371009db5dd443339ca1</pre>
+
+  <label>Nhập API Key nếu muốn override:</label><br/>
+  <input type="text" id="hailenApiKey" value="248c26ea0cd1371009db5dd443339ca1" style="width:300px;"/>
+  <button id="callHailenAPI">Cập nhật lịch sử</button>
+
+  <h4>Kết quả trả về:</h4>
+  <pre id="hailenResult" style="background:#f5f5f5; padding:10px;"></pre>
+</div>`;
+
+// Thêm tab vào SPA container #app
+document.querySelector('#app').insertAdjacentHTML('beforeend', hailenTabHTML);
+
+// ===== Hàm gọi API =====
+window.updateHailenHistory = async function() {
+    const key = document.getElementById('hailenApiKey').value.trim();
+    if(!key){ alert('Nhập API Key'); return; }
+
+    const res = await fetch('/api/hailen/history?key='+key+'&user=hailen');
+    const data = await res.json();
+
+    document.getElementById('hailenResult').textContent = JSON.stringify(data, null, 2);
+};
+
+// Gán sự kiện cho button
+document.getElementById('callHailenAPI').addEventListener('click', updateHailenHistory);
