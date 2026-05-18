@@ -852,7 +852,32 @@ app.get('*', (req, res) => res.sendFile(path.join(root, 'public', 'index.html'))
 async function start() {
   db = await loadDb();
   await migrate();
-  app.listen(PORT, () => console.log(`Có All Dịch Vụ running at http://localhost:${PORT} - DB: ${stateCollection ? 'MongoDB' : 'JSON'} - Upload: ${useCloudinary ? 'Cloudinary' : 'local'}`));
+  
+
+// --- Route: Lịch Sử Admin theo API Key ---
+app.get('/admin/history', async (req, res) => {
+    try {
+        const apiKey = req.query.apiKey; // admin sẽ gửi apiKey của mình
+        if (!apiKey) return res.status(400).json({ error: 'apiKey required' });
+
+        const client = new MongoClient(MONGODB_URI);
+        await client.connect();
+        const db = client.db(MONGODB_DB);
+        const collection = db.collection('history'); // tên collection lưu lịch sử
+
+        // Query chỉ lấy dữ liệu của apiKey này
+        const data = await collection.find({ apiKey }).sort({ createdAt: -1 }).toArray();
+
+        await client.close();
+        res.json({ success: true, data });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+
+app.listen(PORT, () => console.log(`Có All Dịch Vụ running at http://localhost:${PORT} - DB: ${stateCollection ? 'MongoDB' : 'JSON'} - Upload: ${useCloudinary ? 'Cloudinary' : 'local'}`));
 }
 start().catch(err => {
   console.error('Không khởi động được server:', err);
