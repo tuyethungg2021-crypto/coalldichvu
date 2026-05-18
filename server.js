@@ -678,26 +678,6 @@ app.get('*', (req, res) => res.sendFile(path.join(root, 'public', 'index.html'))
 async function start() {
   db = await loadDb();
   await migrate();
-  // Route Hailen - gọi otp24h.xyz và lưu MongoDB
-app.get('/api/hailen/history', async (req,res)=>{
-  const user = req.query.user;
-  if(user !== 'hailen') return res.status(403).json({error:'Forbidden'});
-
-  const key = req.query.key;
-  if(!key) return res.status(400).json({error:'Missing API Key'});
-
-  try {
-    const response = await fetch(`https://otp24h.xyz/api?apik=${key}`);
-    const data = await response.json();
-
-    await History.create({user:'hailen', result:data});
-
-    res.json(data);
-  } catch(err) {
-    console.error(err);
-    res.status(500).json({error:'Cannot call API'});
-  }
-});
   app.listen(PORT, () => console.log(`Có All Dịch Vụ running at http://localhost:${PORT} - DB: ${stateCollection ? 'MongoDB' : 'JSON'} - Upload: ${useCloudinary ? 'Cloudinary' : 'local'}`));
 }
 start().catch(err => {
