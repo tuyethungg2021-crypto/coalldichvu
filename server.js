@@ -203,7 +203,41 @@ async function fetchJson(url) {
   return data;
 }
 function isProviderOk(provider, data) {
-  return provider === 'codesim' ? Number(data.status) === 200 : Number(data.ResponseCode) === 0;
+  data = data || {};
+  if (provider === 'codesim') {
+    return Number(data.status) === 200 || Number(data.code) === 200 || data.success === true || String(data.status || '').toLowerCase() === 'success';
+  }
+  return Number(data.ResponseCode) === 0 || data.success === true || String(data.status || '').toLowerCase() === 'success' ||
+    (!!data.Result && (data.Result.Id || data.Result.ID || data.Result.id || data.Result.Number || data.Result.Phone || data.Result.Code));
+}
+function pick(obj, keys) {
+  obj = obj || {};
+  for (const k of keys) {
+    if (obj[k] !== undefined && obj[k] !== null && String(obj[k]).trim() !== '') return obj[k];
+  }
+  return '';
+}
+function normalizeApiPhone(v) {
+  const phone = normalizePhoneNumber(v);
+  return phone && /^0\d{8,10}$/.test(phone) ? phone : '';
+}
+function rentPayload(provider, apiResult) {
+  apiResult = apiResult || {};
+  return provider === 'codesim' ? (apiResult.data || apiResult.Data || apiResult.result || apiResult.Result || {}) : (apiResult.Result || apiResult.result || apiResult.data || apiResult.Data || {});
+}
+function normalizeRentResult(provider, apiResult) {
+  const rs = rentPayload(provider, apiResult);
+  const phone = normalizeApiPhone(pick(rs, ['phone','Phone','phone_number','phoneNumber','number','Number','sim','Sim','mobile','Mobile']));
+  const otpId = String(pick(rs, ['otpId','otpID','OtpId','OTPId','otp_id','id','Id','ID','request_id','requestId','order_id','orderId','rental_id','rentalId']) || '').trim();
+  const simId = String(pick(rs, ['simId','SimId','sim_id','id','Id','ID','request_id','requestId','order_id','orderId','rental_id','rentalId']) || otpId || '').trim();
+  const cost = Math.floor(Number(pick(rs, ['payment','Payment','price','Price','Cost','cost','amount','Amount']) || 0));
+  return { raw: rs, phone, otpId, simId, cost };
+}
+function normalizeOtpResult(provider, apiResult) {
+  const rs = rentPayload(provider, apiResult);
+  const code = String(pick(rs, ['code','Code','otp','OTP','otp_code','otpCode','pin','Pin']) || '').trim();
+  const sms = String(pick(rs, ['content','Content','sms','SMS','message','Message','text','Text']) || '').trim();
+  return { raw: rs, code, sms };
 }
 async function simApi(provider, action, params = {}) {
   const cfg = providerCfg(provider);
@@ -370,15 +404,12 @@ app.post('/api/rentals', auth, async (req, res) => {
             markHighlandsStock(stock.id, 'hold', { note: out.message || out.Msg || 'API không thuê lại được số này', held_at: now() });
             continue;
           }
-          const rs = provider === 'codesim' ? (out.data || {}) : (out.Result || {});
-          const gotPhone = provider === 'codesim' ? rs.phone : (String(rs.Number || '').startsWith('0') ? String(rs.Number || '') : ('0' + String(rs.Number || '')));
-          const gotOtpId = provider === 'codesim' ? rs.otpId : rs.Id;
-          const gotSimId = provider === 'codesim' ? rs.simId : rs.Id;
-          if (!gotPhone || !gotOtpId || normalizePhoneNumber(gotPhone) !== normalizePhoneNumber(tryPhone)) {
-            markHighlandsStock(stock.id, 'hold', { note: 'API trả sai số hoặc thiếu OTP ID', held_at: now() });
+          const parsed = normalizeRentResult(provider, out);
+          if (!parsed.phone || !parsed.otpId || normalizePhoneNumber(parsed.phone) !== normalizePhoneNumber(tryPhone)) {
+            markHighlandsStock(stock.id, 'hold', { note: 'API trả sai số hoặc thiếu OTP ID. Raw: ' + JSON.stringify(out).slice(0, 350), held_at: now() });
             continue;
           }
-          pickedStock = stock; wantedPhone = tryPhone; apiResult = out; result = rs; phone = gotPhone; otpId = gotOtpId; simId = gotSimId;
+          pickedStock = stock; wantedPhone = tryPhone; apiResult = out; result = parsed.raw; phone = parsed.phone; otpId = parsed.otpId; simId = parsed.simId;
           break;
         } catch (err) {
           markHighlandsStock(stock.id, 'hold', { note: 'Lỗi API khi thuê lại: ' + (err.message || err), held_at: now() });
@@ -389,13 +420,14 @@ app.post('/api/rentals', auth, async (req, res) => {
     } else {
       apiResult = await simApi(provider, 'rent', { service_id: service.external_app_id, appId: service.external_app_id, carrier: networkId, network_id: networkId });
       if (!isProviderOk(provider, apiResult)) return res.status(400).json({ error: apiResult.message || apiResult.Msg || 'API không cấp được số', api: apiResult });
-      result = provider === 'codesim' ? (apiResult.data || {}) : (apiResult.Result || {});
-      phone = provider === 'codesim' ? result.phone : (String(result.Number || '').startsWith('0') ? String(result.Number || '') : ('0' + String(result.Number || '')));
-      otpId = provider === 'codesim' ? result.otpId : result.Id;
-      simId = provider === 'codesim' ? result.simId : result.Id;
+      const parsed = normalizeRentResult(provider, apiResult);
+      result = parsed.raw;
+      phone = parsed.phone;
+      otpId = parsed.otpId;
+      simId = parsed.simId;
       if (!phone || !otpId) return res.status(400).json({ error: apiResult.message || apiResult.Msg || 'API không trả về số sim/OTP ID', api: apiResult });
     }
-    const cost = Math.floor(Number(result.payment || result.Cost || service.price || 0));
+    const cost = Math.floor(Number(normalizeRentResult(provider, apiResult).cost || result.payment || result.Payment || result.Cost || result.cost || service.price || 0));
     req.user.balance = Math.floor(Number(req.user.balance || 0) - Number(service.price || cost));
     const displayNumber = String(phone || '');
     const rental = {
@@ -422,12 +454,14 @@ app.post('/api/rentals/:id/check-code', auth, async (req, res) => {
     if (!r.external_id) return res.status(400).json({ error: 'Lượt thuê này không có OTP ID API' });
     const apiResult = await simApi(r.provider || 'legacy', 'code', { otp_id: r.external_id, id: r.external_id });
     const provider = r.provider || 'legacy';
-    if (provider === 'codesim' && isProviderOk(provider, apiResult) && apiResult.data && apiResult.data.code) {
-      const result = apiResult.data || {};
-      r.status = 'Đã nhận code'; r.otp_code = String(result.code || ''); r.sms = String(result.content || ''); r.ended_at = now(); r.note = apiResult.message || ''; if (r.highlands_stock_id) markHighlandsStock(r.highlands_stock_id, 'sold', { sold_at: now(), note: 'Đã nhận OTP, chốt bán' });
-    } else if (provider === 'legacy' && isProviderOk(provider, apiResult) && apiResult.Result && apiResult.Result.Code) {
-      const result = apiResult.Result || {};
-      r.status = 'Đã nhận code'; r.otp_code = String(result.Code || ''); r.sms = String(result.SMS || ''); r.ended_at = now(); r.note = apiResult.Msg || ''; if (r.highlands_stock_id) markHighlandsStock(r.highlands_stock_id, 'sold', { sold_at: now(), note: 'Đã nhận OTP, chốt bán' });
+    const otp = normalizeOtpResult(provider, apiResult);
+    if (isProviderOk(provider, apiResult) && otp.code) {
+      r.status = 'Đã nhận code';
+      r.otp_code = otp.code;
+      r.sms = otp.sms;
+      r.ended_at = now();
+      r.note = apiResult.message || apiResult.Msg || 'Đã nhận OTP';
+      if (r.highlands_stock_id) markHighlandsStock(r.highlands_stock_id, 'sold', { sold_at: now(), note: 'Đã nhận OTP, chốt bán' });
     } else {
       r.note = apiResult.message || apiResult.Msg || 'Chưa có OTP, vui lòng thử lại sau';
     }
@@ -454,27 +488,29 @@ app.post('/api/rentals/:id/cancel', auth, async (req, res) => {
 function onlyDigits(v) { return String(v ?? '').replace(/[^0-9]/g, ''); }
 function normText(v) { return String(v ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9_]+/g, ' ').trim(); }
 function makeSepayCode(username) { return ('NAP ' + String(username || '').toLowerCase() + ' ' + Math.random().toString(36).slice(2, 7).toUpperCase()).trim(); }
-function buildSepayQr(amount, content) {
-  const bank = String(db.settings.sepayBankCode || process.env.SEPAY_BANK || 'MB').trim();
-  const account = String(db.settings.sepayAccount || process.env.SEPAY_ACCOUNT || '').trim();
+function normalizeVietQrBank(v) {
+  const raw = String(v || '').trim();
+  const key = raw.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const map = { mbbank: 'MB', mb: 'MB', mbs: 'MB', vietcombank: 'VCB', vcb: 'VCB', techcombank: 'TCB', tcb: 'TCB', acb: 'ACB', bidv: 'BIDV', vietinbank: 'ICB', icb: 'ICB', vpbank: 'VPB', vpb: 'VPB', tpbank: 'TPB', tpb: 'TPB', momo: 'MOMO' };
+  return map[key] || raw.toUpperCase();
+}
+function buildSepayQrUrl(amount, content, template, ext) {
+  const bank = normalizeVietQrBank(db.settings.sepayBankCode || process.env.SEPAY_BANK || 'MB');
+  const account = onlyDigits(db.settings.sepayAccount || process.env.SEPAY_ACCOUNT || '');
   const name = String(db.settings.sepayAccountName || process.env.SEPAY_ACCOUNT_NAME || '').trim();
-  if (!bank || !account) return '';
+  const money = Math.floor(Number(amount || 0));
+  if (!bank || !account || money <= 0) return '';
   const q = new URLSearchParams();
-  if (amount) q.set('amount', String(Math.floor(Number(amount || 0))));
+  q.set('amount', String(money));
   q.set('addInfo', String(content || ''));
   if (name) q.set('accountName', name);
-  return `https://img.vietqr.io/image/${encodeURIComponent(bank)}-${encodeURIComponent(account)}-compact2.png?${q.toString()}`;
+  return `https://img.vietqr.io/image/${encodeURIComponent(bank)}-${encodeURIComponent(account)}-${template}.${ext}?${q.toString()}`;
+}
+function buildSepayQr(amount, content) {
+  return buildSepayQrUrl(amount, content, 'compact2', 'png');
 }
 function buildSepayQrAlt(amount, content) {
-  const bank = String(db.settings.sepayBankCode || process.env.SEPAY_BANK || 'MB').trim();
-  const account = String(db.settings.sepayAccount || process.env.SEPAY_ACCOUNT || '').trim();
-  const name = String(db.settings.sepayAccountName || process.env.SEPAY_ACCOUNT_NAME || '').trim();
-  if (!bank || !account) return '';
-  const q = new URLSearchParams();
-  if (amount) q.set('amount', String(Math.floor(Number(amount || 0))));
-  q.set('addInfo', String(content || ''));
-  if (name) q.set('accountName', name);
-  return `https://api.vietqr.io/image/${encodeURIComponent(bank)}-${encodeURIComponent(account)}-compact2.jpg?${q.toString()}`;
+  return buildSepayQrUrl(amount, content, 'print', 'png');
 }
 function extractSepayPayload(body) {
   const b = body || {};
@@ -510,7 +546,7 @@ app.post('/api/deposits/auto', auth, async (req, res) => {
     const qrUrl = buildSepayQr(amount, code);
     const qrUrlAlt = buildSepayQrAlt(amount, code);
     if (!qrUrl) return res.status(400).json({ error: 'Admin chưa cấu hình mã ngân hàng hoặc số tài khoản nhận tiền trong Nạp tiền admin.' });
-    const dep = { id: uid('d'), user_id: req.user.id, amount, content: code, proof_image: '', status: 'Chờ thanh toán', admin_note: 'Đang chờ SePay xác nhận', created_at: now(), reviewed_at: '', method: 'sepay', sepay_code: code, sepay_qr: qrUrl };
+    const dep = { id: uid('d'), user_id: req.user.id, amount, content: code, proof_image: '', status: 'Chờ thanh toán', admin_note: 'Đang chờ SePay xác nhận', created_at: now(), reviewed_at: '', method: 'sepay', sepay_code: code, sepay_qr: qrUrl, sepay_qr_alt: qrUrlAlt };
     db.deposits.push(dep);
     saveDb();
     res.json({ deposit: dep, qrUrl, qrUrlAlt, transferContent: code, bank: db.settings.sepayBankCode, account: db.settings.sepayAccount, accountName: db.settings.sepayAccountName });
