@@ -1,45 +1,13 @@
-
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="vi">
 <head>
-    <title>Web Chaycodeso3</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Có All Dịch Vụ</title>
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-    <h2>Web hiện tại</h2>
-    <!-- Giao diện cũ giữ nguyên -->
-    
-    <h3>Lịch sử API Key</h3>
-    <input type="text" id="apiKey" placeholder="Nhập API Key" />
-    <button onclick="viewHistory()">Xem lịch sử</button>
-    <table border="1" id="historyTable">
-        <thead>
-            <tr>
-                <th>ID</th>
-                <th>Amount</th>
-                <th>Type</th>
-                <th>Status</th>
-                <th>Time</th>
-            </tr>
-        </thead>
-        <tbody></tbody>
-    </table>
-
-    <script>
-        function viewHistory(){
-            const key = document.getElementById('apiKey').value;
-            if(!key){ alert('Nhập API Key'); return; }
-            fetch('/api/chaycodeso3/history?key=' + key)
-            .then(res=>res.json())
-            .then(data=>{
-                const tbody = document.querySelector('#historyTable tbody');
-                tbody.innerHTML = '';
-                data.forEach(d=>{
-                    const tr = document.createElement('tr');
-                    tr.innerHTML = '<td>'+d.id+'</td><td>'+d.amount+'</td><td>'+d.type+'</td><td>'+d.status+'</td><td>'+d.time+'</td>';
-                    tbody.appendChild(tr);
-                });
-            });
-        }
-    </script>
+  <div id="app"></div>
+  <script src="app.js?v=sepay-auto-v13"></script>
 </body>
 </html>
