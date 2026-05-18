@@ -1,9 +1,0 @@
-services:
-  - type: web
-    name: co-all-dich-vu
-    env: node
-    buildCommand: npm install --omit=dev --no-audit --no-fund
-    startCommand: node server.js
-    envVars:
-      - key: NODE_VERSION
-        value: 20.20.2
