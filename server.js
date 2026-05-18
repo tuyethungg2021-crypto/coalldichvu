@@ -49,7 +49,7 @@ function daysInactive(u) {
 }
 
 const defaults = {
-  users: [], services: [], rentals: [], deposits: [], notifications: [], dmxProducts: [], dmxOrders: [], sepayTransactions: [],
+  users: [], services: [], rentals: [], deposits: [], notifications: [], dmxProducts: [], dmxOrders: [], sepayTransactions: [], highlandsStock: [],
   settings: {
     siteName: 'Có All Dịch Vụ',
     brandText: 'Thuê sim nhanh - nhiều nhà mạng - quản lý dễ dàng',
@@ -74,7 +74,7 @@ let db = null;
 
 function normalizeDb(parsed) {
   parsed = parsed || {};
-  return { ...defaults, ...parsed, dmxProducts: parsed.dmxProducts || [], dmxOrders: parsed.dmxOrders || [], sepayTransactions: parsed.sepayTransactions || [], settings: { ...defaults.settings, ...(parsed.settings || {}) } };
+  return { ...defaults, ...parsed, dmxProducts: parsed.dmxProducts || [], dmxOrders: parsed.dmxOrders || [], sepayTransactions: parsed.sepayTransactions || [], highlandsStock: parsed.highlandsStock || [], settings: { ...defaults.settings, ...(parsed.settings || {}) } };
 }
 async function loadDb() {
   if (MONGODB_URI) {
@@ -252,6 +252,7 @@ async function refundRental(r, reason = 'Hết thời gian chờ OTP, đã tự 
   r.ended_at = r.ended_at || now();
   r.note = reason;
   await cancelExternalRental(r);
+  if (r.highlands_stock_id) markHighlandsStock(r.highlands_stock_id, 'free', { rental_id: '', user_id: '', released_at: now(), note: reason });
   return true;
 }
 async function processExpiredRentals() {
@@ -268,6 +269,24 @@ async function processExpiredRentals() {
   }
   if (changed) saveDb();
 }
+
+function normalizePhoneNumber(v) {
+  let x = String(v || '').trim().replace(/[^0-9]/g, '');
+  if (x.startsWith('84') && x.length >= 11) x = '0' + x.slice(2);
+  return x;
+}
+function getHighlandsAvailable(serviceId) {
+  return (db.highlandsStock || []).filter(x => String(x.service_id) === String(serviceId) && String(x.status || 'free') === 'free');
+}
+function markHighlandsStock(stockId, status, extra = {}) {
+  const item = (db.highlandsStock || []).find(x => x.id === stockId);
+  if (!item) return null;
+  item.status = status;
+  Object.assign(item, extra);
+  item.updated_at = now();
+  return item;
+}
+
 function safeSettingsForUser(settings, isAdmin) {
   const out = { ...settings };
   if (!isAdmin) { delete out.apiKey; delete out.legacyApiKey; delete out.codesimApiKey; }
@@ -324,13 +343,25 @@ app.post('/api/rentals', auth, async (req, res) => {
     if (!service.external_app_id) return res.status(400).json({ error: 'Dịch vụ này chưa gắn Service ID API. Admin hãy đồng bộ API hoặc nhập Service ID.' });
     if ((req.user.balance || 0) < service.price) return res.status(400).json({ error: 'Số dư web không đủ, vui lòng nạp thêm tiền' });
     const networkId = String(req.body.carrier || '').trim();
-    const apiResult = await simApi(service.provider || 'legacy', 'rent', { service_id: service.external_app_id, appId: service.external_app_id, carrier: networkId, network_id: networkId });
+    const isHighlands = String(service.service_type || '').toLowerCase() === 'highlands';
+    let pickedStock = null;
+    let wantedPhone = '';
+    if (isHighlands) {
+      pickedStock = getHighlandsAvailable(service.id)[0];
+      if (!pickedStock) return res.status(400).json({ error: 'Kho số Highlands của dịch vụ này đã hết. Vui lòng quay lại sau.' });
+      wantedPhone = normalizePhoneNumber(pickedStock.phone);
+      if (!wantedPhone) return res.status(400).json({ error: 'Số Highlands trong kho không hợp lệ, admin cần kiểm tra lại.' });
+    }
+    const apiResult = await simApi(service.provider || 'legacy', 'rent', { service_id: service.external_app_id, appId: service.external_app_id, carrier: networkId, network_id: networkId, phone: wantedPhone });
     if (!isProviderOk(service.provider || 'legacy', apiResult)) return res.status(400).json({ error: apiResult.message || apiResult.Msg || 'API không cấp được số', api: apiResult });
     const result = (service.provider === 'codesim') ? (apiResult.data || {}) : (apiResult.Result || {});
     const phone = service.provider === 'codesim' ? result.phone : (String(result.Number || '').startsWith('0') ? String(result.Number || '') : ('0' + String(result.Number || '')));
     const otpId = service.provider === 'codesim' ? result.otpId : result.Id;
     const simId = service.provider === 'codesim' ? result.simId : result.Id;
     if (!phone || !otpId) return res.status(400).json({ error: apiResult.message || apiResult.Msg || 'API không trả về số sim/OTP ID', api: apiResult });
+    if (isHighlands && normalizePhoneNumber(phone) !== normalizePhoneNumber(wantedPhone)) {
+      return res.status(400).json({ error: 'API không trả về đúng số trong kho Highlands. Chưa trừ tiền khách.', api: apiResult });
+    }
     const cost = Math.floor(Number(result.payment || result.Cost || service.price || 0));
     req.user.balance = Math.floor(Number(req.user.balance || 0) - Number(service.price || cost));
     const displayNumber = String(phone || '');
@@ -338,9 +369,12 @@ app.post('/api/rentals', auth, async (req, res) => {
       id: uid('r'), user_id: req.user.id, service_id: service.id, service_name: service.name,
       network: networkId || service.network || '', phone_number: displayNumber, price: service.price, api_cost: cost,
       external_id: String(otpId || ''), external_sim_id: String(simId || ''), api_app_id: String(service.external_app_id), provider: service.provider || 'legacy',
+      service_type: isHighlands ? 'highlands' : (service.service_type || 'sim'), highlands_stock_id: pickedStock ? pickedStock.id : '',
       status: 'Đang chờ code', rented_at: now(), ended_at: '', otp_code: '', sms: '', note: apiResult.message || apiResult.Msg || ''
     };
-    db.rentals.push(rental); saveDb();
+    db.rentals.push(rental);
+    if (pickedStock) markHighlandsStock(pickedStock.id, 'sold', { rental_id: rental.id, user_id: req.user.id, sold_at: now(), last_otp_id: String(otpId || '') });
+    saveDb();
     res.json({ rental, user: cleanUser(req.user), api: apiResult });
   } catch (e) { res.status(500).json({ error: e.message || 'Không gọi được API thuê sim' }); }
 });
@@ -529,6 +563,41 @@ app.patch('/api/admin/services/:id', auth, adminOnly, (req, res) => {
   s.updated_at = now(); saveDb(); res.json(s);
 });
 app.delete('/api/admin/services/:id', auth, adminOnly, (req, res) => { db.services = db.services.filter(s => s.id !== req.params.id); saveDb(); res.json({ ok: true }); });
+
+
+app.get('/api/admin/highlands-stock', auth, adminOnly, (req, res) => {
+  const serviceId = String(req.query.service_id || '').trim();
+  let rows = db.highlandsStock || [];
+  if (serviceId) rows = rows.filter(x => String(x.service_id) === serviceId);
+  res.json(rows.map(x => ({ ...x, service_name: (db.services.find(s => s.id === x.service_id) || {}).name || '' })).sort((a,b) => (a.status||'').localeCompare(b.status||'') || b.created_at.localeCompare(a.created_at)));
+});
+app.post('/api/admin/highlands-stock/import', auth, adminOnly, (req, res) => {
+  const serviceId = String(req.body.service_id || '').trim();
+  const service = db.services.find(s => s.id === serviceId);
+  if (!service) return res.status(404).json({ error: 'Không tìm thấy dịch vụ để nhập kho' });
+  const raw = String(req.body.phones || '');
+  const phones = raw.split(/[\s,;]+/).map(normalizePhoneNumber).filter(x => /^0\d{8,10}$/.test(x));
+  let added = 0, skipped = 0;
+  db.highlandsStock = db.highlandsStock || [];
+  for (const phone of phones) {
+    if (db.highlandsStock.some(x => String(x.service_id) === serviceId && normalizePhoneNumber(x.phone) === phone && String(x.status || 'free') !== 'deleted')) { skipped++; continue; }
+    db.highlandsStock.push({ id: uid('hl'), service_id: serviceId, phone, status: 'free', note: '', created_at: now(), updated_at: now(), rental_id: '', user_id: '' });
+    added++;
+  }
+  saveDb();
+  res.json({ ok: true, added, skipped, total: (db.highlandsStock || []).filter(x => x.service_id === serviceId && x.status !== 'deleted').length });
+});
+app.patch('/api/admin/highlands-stock/:id', auth, adminOnly, (req, res) => {
+  const item = (db.highlandsStock || []).find(x => x.id === req.params.id);
+  if (!item) return res.status(404).json({ error: 'Không tìm thấy số Highlands' });
+  if (req.body.status !== undefined) item.status = String(req.body.status || 'free');
+  if (req.body.note !== undefined) item.note = String(req.body.note || '');
+  item.updated_at = now(); saveDb(); res.json(item);
+});
+app.delete('/api/admin/highlands-stock/:id', auth, adminOnly, (req, res) => {
+  db.highlandsStock = (db.highlandsStock || []).filter(x => x.id !== req.params.id);
+  saveDb(); res.json({ ok: true });
+});
 
 app.get('/api/admin/rentals', auth, adminOnly, async (req, res) => { await processExpiredRentals(); res.json(db.rentals.map(r => ({ ...r, username: (db.users.find(u => u.id === r.user_id) || {}).username || 'unknown' })).sort((a,b) => b.rented_at.localeCompare(a.rented_at))); });
 app.patch('/api/admin/rentals/:id', auth, adminOnly, (req, res) => {
