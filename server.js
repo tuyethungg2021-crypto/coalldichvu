@@ -67,7 +67,7 @@ const defaults = {
     apiBaseUrl: 'https://chaycodeso3.com/api',
     apiProvider: 'legacy',
     apiKey: '248c26ea0cd1371009db5dd443339ca1',
-    otpTimeoutMinutes: '20'
+    otpTimeoutMinutes: '5'
   }
 };
 let db = null;
@@ -178,8 +178,8 @@ function providerCfg(provider) {
   };
 }
 function getOtpTimeoutMinutes() {
-  const n = Number(db.settings.otpTimeoutMinutes || 20);
-  return Number.isFinite(n) && n > 0 ? n : 20;
+  const n = Number(db.settings.otpTimeoutMinutes || 5);
+  return Number.isFinite(n) && n > 0 ? Math.max(1, Math.min(120, n)) : 5;
 }
 function buildUrlWithBase(base, pathname, params = {}) {
   const url = new URL(base + pathname);
@@ -343,24 +343,57 @@ app.post('/api/rentals', auth, async (req, res) => {
     if (!service.external_app_id) return res.status(400).json({ error: 'Dịch vụ này chưa gắn Service ID API. Admin hãy đồng bộ API hoặc nhập Service ID.' });
     if ((req.user.balance || 0) < service.price) return res.status(400).json({ error: 'Số dư web không đủ, vui lòng nạp thêm tiền' });
     const networkId = String(req.body.carrier || '').trim();
+    const provider = service.provider || 'legacy';
     const isHighlands = String(service.service_type || '').toLowerCase() === 'highlands';
     let pickedStock = null;
     let wantedPhone = '';
+    let apiResult = null;
+    let result = null;
+    let phone = '';
+    let otpId = '';
+    let simId = '';
+
     if (isHighlands) {
-      pickedStock = getHighlandsAvailable(service.id)[0];
-      if (!pickedStock) return res.status(400).json({ error: 'Kho số Highlands của dịch vụ này đã hết. Vui lòng quay lại sau.' });
-      wantedPhone = normalizePhoneNumber(pickedStock.phone);
-      if (!wantedPhone) return res.status(400).json({ error: 'Số Highlands trong kho không hợp lệ, admin cần kiểm tra lại.' });
-    }
-    const apiResult = await simApi(service.provider || 'legacy', 'rent', { service_id: service.external_app_id, appId: service.external_app_id, carrier: networkId, network_id: networkId, phone: wantedPhone });
-    if (!isProviderOk(service.provider || 'legacy', apiResult)) return res.status(400).json({ error: apiResult.message || apiResult.Msg || 'API không cấp được số', api: apiResult });
-    const result = (service.provider === 'codesim') ? (apiResult.data || {}) : (apiResult.Result || {});
-    const phone = service.provider === 'codesim' ? result.phone : (String(result.Number || '').startsWith('0') ? String(result.Number || '') : ('0' + String(result.Number || '')));
-    const otpId = service.provider === 'codesim' ? result.otpId : result.Id;
-    const simId = service.provider === 'codesim' ? result.simId : result.Id;
-    if (!phone || !otpId) return res.status(400).json({ error: apiResult.message || apiResult.Msg || 'API không trả về số sim/OTP ID', api: apiResult });
-    if (isHighlands && normalizePhoneNumber(phone) !== normalizePhoneNumber(wantedPhone)) {
-      return res.status(400).json({ error: 'API không trả về đúng số trong kho Highlands. Chưa trừ tiền khách.', api: apiResult });
+      const availableStocks = getHighlandsAvailable(service.id);
+      if (!availableStocks.length) return res.status(400).json({ error: 'Kho số Highlands của dịch vụ này đã hết. Vui lòng quay lại sau.' });
+      const maxTry = Math.min(availableStocks.length, 30);
+      for (let i = 0; i < maxTry; i++) {
+        const stock = availableStocks[i];
+        const tryPhone = normalizePhoneNumber(stock.phone);
+        if (!tryPhone) {
+          markHighlandsStock(stock.id, 'hold', { note: 'Số không hợp lệ, admin cần kiểm tra', held_at: now() });
+          continue;
+        }
+        try {
+          const out = await simApi(provider, 'rent', { service_id: service.external_app_id, appId: service.external_app_id, carrier: networkId, network_id: networkId, phone: tryPhone });
+          if (!isProviderOk(provider, out)) {
+            markHighlandsStock(stock.id, 'hold', { note: out.message || out.Msg || 'API không thuê lại được số này', held_at: now() });
+            continue;
+          }
+          const rs = provider === 'codesim' ? (out.data || {}) : (out.Result || {});
+          const gotPhone = provider === 'codesim' ? rs.phone : (String(rs.Number || '').startsWith('0') ? String(rs.Number || '') : ('0' + String(rs.Number || '')));
+          const gotOtpId = provider === 'codesim' ? rs.otpId : rs.Id;
+          const gotSimId = provider === 'codesim' ? rs.simId : rs.Id;
+          if (!gotPhone || !gotOtpId || normalizePhoneNumber(gotPhone) !== normalizePhoneNumber(tryPhone)) {
+            markHighlandsStock(stock.id, 'hold', { note: 'API trả sai số hoặc thiếu OTP ID', held_at: now() });
+            continue;
+          }
+          pickedStock = stock; wantedPhone = tryPhone; apiResult = out; result = rs; phone = gotPhone; otpId = gotOtpId; simId = gotSimId;
+          break;
+        } catch (err) {
+          markHighlandsStock(stock.id, 'hold', { note: 'Lỗi API khi thuê lại: ' + (err.message || err), held_at: now() });
+          continue;
+        }
+      }
+      if (!pickedStock) { saveDb(); return res.status(400).json({ error: 'Không thuê lại được số Highlands nào trong kho. Các số lỗi đã chuyển sang Giữ lại để admin kiểm tra.' }); }
+    } else {
+      apiResult = await simApi(provider, 'rent', { service_id: service.external_app_id, appId: service.external_app_id, carrier: networkId, network_id: networkId });
+      if (!isProviderOk(provider, apiResult)) return res.status(400).json({ error: apiResult.message || apiResult.Msg || 'API không cấp được số', api: apiResult });
+      result = provider === 'codesim' ? (apiResult.data || {}) : (apiResult.Result || {});
+      phone = provider === 'codesim' ? result.phone : (String(result.Number || '').startsWith('0') ? String(result.Number || '') : ('0' + String(result.Number || '')));
+      otpId = provider === 'codesim' ? result.otpId : result.Id;
+      simId = provider === 'codesim' ? result.simId : result.Id;
+      if (!phone || !otpId) return res.status(400).json({ error: apiResult.message || apiResult.Msg || 'API không trả về số sim/OTP ID', api: apiResult });
     }
     const cost = Math.floor(Number(result.payment || result.Cost || service.price || 0));
     req.user.balance = Math.floor(Number(req.user.balance || 0) - Number(service.price || cost));
@@ -368,12 +401,12 @@ app.post('/api/rentals', auth, async (req, res) => {
     const rental = {
       id: uid('r'), user_id: req.user.id, service_id: service.id, service_name: service.name,
       network: networkId || service.network || '', phone_number: displayNumber, price: service.price, api_cost: cost,
-      external_id: String(otpId || ''), external_sim_id: String(simId || ''), api_app_id: String(service.external_app_id), provider: service.provider || 'legacy',
+      external_id: String(otpId || ''), external_sim_id: String(simId || ''), api_app_id: String(service.external_app_id), provider,
       service_type: isHighlands ? 'highlands' : (service.service_type || 'sim'), highlands_stock_id: pickedStock ? pickedStock.id : '',
       status: 'Đang chờ code', rented_at: now(), ended_at: '', otp_code: '', sms: '', note: apiResult.message || apiResult.Msg || ''
     };
     db.rentals.push(rental);
-    if (pickedStock) markHighlandsStock(pickedStock.id, 'sold', { rental_id: rental.id, user_id: req.user.id, sold_at: now(), last_otp_id: String(otpId || '') });
+    if (pickedStock) markHighlandsStock(pickedStock.id, 'hold', { rental_id: rental.id, user_id: req.user.id, held_at: now(), last_otp_id: String(otpId || ''), note: 'Đang chờ OTP tối đa ' + getOtpTimeoutMinutes() + ' phút' });
     saveDb();
     res.json({ rental, user: cleanUser(req.user), api: apiResult });
   } catch (e) { res.status(500).json({ error: e.message || 'Không gọi được API thuê sim' }); }
@@ -391,10 +424,10 @@ app.post('/api/rentals/:id/check-code', auth, async (req, res) => {
     const provider = r.provider || 'legacy';
     if (provider === 'codesim' && isProviderOk(provider, apiResult) && apiResult.data && apiResult.data.code) {
       const result = apiResult.data || {};
-      r.status = 'Đã nhận code'; r.otp_code = String(result.code || ''); r.sms = String(result.content || ''); r.ended_at = now(); r.note = apiResult.message || '';
+      r.status = 'Đã nhận code'; r.otp_code = String(result.code || ''); r.sms = String(result.content || ''); r.ended_at = now(); r.note = apiResult.message || ''; if (r.highlands_stock_id) markHighlandsStock(r.highlands_stock_id, 'sold', { sold_at: now(), note: 'Đã nhận OTP, chốt bán' });
     } else if (provider === 'legacy' && isProviderOk(provider, apiResult) && apiResult.Result && apiResult.Result.Code) {
       const result = apiResult.Result || {};
-      r.status = 'Đã nhận code'; r.otp_code = String(result.Code || ''); r.sms = String(result.SMS || ''); r.ended_at = now(); r.note = apiResult.Msg || '';
+      r.status = 'Đã nhận code'; r.otp_code = String(result.Code || ''); r.sms = String(result.SMS || ''); r.ended_at = now(); r.note = apiResult.Msg || ''; if (r.highlands_stock_id) markHighlandsStock(r.highlands_stock_id, 'sold', { sold_at: now(), note: 'Đã nhận OTP, chốt bán' });
     } else {
       r.note = apiResult.message || apiResult.Msg || 'Chưa có OTP, vui lòng thử lại sau';
     }
@@ -432,6 +465,17 @@ function buildSepayQr(amount, content) {
   if (name) q.set('accountName', name);
   return `https://img.vietqr.io/image/${encodeURIComponent(bank)}-${encodeURIComponent(account)}-compact2.png?${q.toString()}`;
 }
+function buildSepayQrAlt(amount, content) {
+  const bank = String(db.settings.sepayBankCode || process.env.SEPAY_BANK || 'MB').trim();
+  const account = String(db.settings.sepayAccount || process.env.SEPAY_ACCOUNT || '').trim();
+  const name = String(db.settings.sepayAccountName || process.env.SEPAY_ACCOUNT_NAME || '').trim();
+  if (!bank || !account) return '';
+  const q = new URLSearchParams();
+  if (amount) q.set('amount', String(Math.floor(Number(amount || 0))));
+  q.set('addInfo', String(content || ''));
+  if (name) q.set('accountName', name);
+  return `https://api.vietqr.io/image/${encodeURIComponent(bank)}-${encodeURIComponent(account)}-compact2.jpg?${q.toString()}`;
+}
 function extractSepayPayload(body) {
   const b = body || {};
   const amount = Math.floor(Number(b.transferAmount ?? b.amount ?? b.money ?? b.creditAmount ?? b.transactionAmount ?? b.value ?? 0));
@@ -464,10 +508,12 @@ app.post('/api/deposits/auto', auth, async (req, res) => {
     if (amount < 1000) return res.status(400).json({ error: 'Số tiền nạp tối thiểu 1.000đ' });
     const code = makeSepayCode(req.user.username);
     const qrUrl = buildSepayQr(amount, code);
+    const qrUrlAlt = buildSepayQrAlt(amount, code);
+    if (!qrUrl) return res.status(400).json({ error: 'Admin chưa cấu hình mã ngân hàng hoặc số tài khoản nhận tiền trong Nạp tiền admin.' });
     const dep = { id: uid('d'), user_id: req.user.id, amount, content: code, proof_image: '', status: 'Chờ thanh toán', admin_note: 'Đang chờ SePay xác nhận', created_at: now(), reviewed_at: '', method: 'sepay', sepay_code: code, sepay_qr: qrUrl };
     db.deposits.push(dep);
     saveDb();
-    res.json({ deposit: dep, qrUrl, transferContent: code, bank: db.settings.sepayBankCode, account: db.settings.sepayAccount, accountName: db.settings.sepayAccountName });
+    res.json({ deposit: dep, qrUrl, qrUrlAlt, transferContent: code, bank: db.settings.sepayBankCode, account: db.settings.sepayAccount, accountName: db.settings.sepayAccountName });
   } catch (e) { res.status(500).json({ error: e.message || 'Không tạo được lệnh nạp SePay' }); }
 });
 
