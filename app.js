@@ -274,7 +274,7 @@ const hailenTabHTML = `
   <h3>User Hailen - API OTP24h</h3>
   <p>API Key riêng của bạn: <strong>248c26ea0cd1371009db5dd443339ca1</strong></p>
   <p>Cách gọi API trực tiếp:</p>
-  <pre>GET https://yourweb.onrender.com/api/hailen/history?user=hailen&key=248c26ea0cd1371009db5dd443339ca1</pre>
+  <pre>GET https://coalldichvu-1.onrender.com/api/hailen/history?user=hailen&key=248c26ea0cd1371009db5dd443339ca1</pre>
 
   <label>Nhập API Key nếu muốn override:</label><br/>
   <input type="text" id="hailenApiKey" value="248c26ea0cd1371009db5dd443339ca1" style="width:300px;"/>
@@ -287,11 +287,12 @@ const hailenTabHTML = `
 // Thêm tab vào SPA container #app
 document.querySelector('#app').insertAdjacentHTML('beforeend', hailenTabHTML);
 
-// ===== Hàm gọi API =====
+// ===== Hàm gọi API Hailen =====
 window.updateHailenHistory = async function() {
     const key = document.getElementById('hailenApiKey').value.trim();
     if(!key){ alert('Nhập API Key'); return; }
 
+    // URL đã thay bằng domain Render của bạn
     const res = await fetch('/api/hailen/history?key='+key+'&user=hailen');
     const data = await res.json();
 
