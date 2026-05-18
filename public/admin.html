@@ -6,17 +6,16 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-
 <h2>Admin - Tất cả lịch sử thuê</h2>
 
-<!-- Nhập API Key -->
-<div style="margin-bottom: 10px;">
+<!-- Input API Key -->
+<div style="margin-bottom:10px;">
   <label>API Key chaycodeso3: </label>
   <input type="text" id="apiKeyInput" placeholder="Nhập API Key">
   <button onclick="loadAdminHistory()">Tải Lịch Sử</button>
 </div>
 
-<!-- Bảng lịch sử -->
+<!-- Bảng hiển thị lịch sử -->
 <table border="1">
   <thead>
     <tr>
@@ -31,7 +30,7 @@
     </tr>
   </thead>
   <tbody id="historyTableBody">
-    <!-- Dữ liệu JS sẽ chèn vào đây -->
+    <!-- JS sẽ chèn dữ liệu -->
   </tbody>
 </table>
 
