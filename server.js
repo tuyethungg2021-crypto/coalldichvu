@@ -441,7 +441,7 @@ app.post('/api/deposits/auto', auth, async (req, res) => {
 
 app.post('/api/sepay/webhook', async (req, res) => {
   try {
-    const webhookKey = String(db.settings.sepayWebhookApiKey || process.env.SEPAY_WEBHOOK_API_KEY || '').trim();
+    const webhookKey = String(process.env.SEPAY_WEBHOOK_API_KEY || db.settings.sepayWebhookApiKey || '').trim();
     const authHeader = String(req.headers['authorization'] || '').trim();
     const providedKey = authHeader.replace(/^Apikey\s+/i, '').trim();
 
