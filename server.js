@@ -67,7 +67,8 @@ const defaults = {
     apiBaseUrl: 'https://chaycodeso3.com/api',
     apiProvider: 'legacy',
     apiKey: '248c26ea0cd1371009db5dd443339ca1',
-    otpTimeoutMinutes: '20'
+    otpTimeoutMinutes: '20',
+    sepayWebhookApiKey: process.env.SEPAY_WEBHOOK_API_KEY || ''
   }
 };
 let db = null;
@@ -270,10 +271,11 @@ async function processExpiredRentals() {
 }
 function safeSettingsForUser(settings, isAdmin) {
   const out = { ...settings };
-  if (!isAdmin) { delete out.apiKey; delete out.legacyApiKey; delete out.codesimApiKey; }
+  if (!isAdmin) { delete out.apiKey; delete out.legacyApiKey; delete out.codesimApiKey; delete out.sepayWebhookApiKey; }
   if (isAdmin && out.legacyApiKey) out.legacyApiKeyMasked = out.legacyApiKey.slice(0, 6) + '...' + out.legacyApiKey.slice(-4);
   if (isAdmin && out.codesimApiKey) out.codesimApiKeyMasked = out.codesimApiKey.slice(0, 6) + '...' + out.codesimApiKey.slice(-4);
   if (isAdmin && out.apiKey) out.apiKeyMasked = out.apiKey.slice(0, 6) + '...' + out.apiKey.slice(-4);
+  if (isAdmin && out.sepayWebhookApiKey) out.sepayWebhookApiKeyMasked = out.sepayWebhookApiKey.slice(0, 6) + '...' + out.sepayWebhookApiKey.slice(-4);
   return out;
 }
 
@@ -439,12 +441,26 @@ app.post('/api/deposits/auto', auth, async (req, res) => {
 
 app.post('/api/sepay/webhook', async (req, res) => {
   try {
+    const webhookKey = String(db.settings.sepayWebhookApiKey || process.env.SEPAY_WEBHOOK_API_KEY || '').trim();
+    const authHeader = String(req.headers['authorization'] || '').trim();
+    const providedKey = authHeader.replace(/^Apikey\s+/i, '').trim();
+
+    if (!webhookKey) {
+      console.warn('SEPAY WEBHOOK: No API key configured — rejecting request for security');
+      return res.status(401).json({ success: false, error: 'Webhook not configured' });
+    }
+    if (providedKey !== webhookKey) {
+      console.warn('SEPAY WEBHOOK: Invalid API key');
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
     db.sepayTransactions = db.sepayTransactions || [];
     const payload = req.body || {};
     console.log('SEPAY WEBHOOK RECEIVED:', JSON.stringify(payload).slice(0, 1500));
     const { amount, content, ref, type } = extractSepayPayload(payload);
     if (type && type.includes('out')) return res.json({ success: true, ignored: 'outgoing' });
-    if (!amount || amount <= 0) return res.json({ success: true, ignored: 'no_amount' });
+    if (!amount || amount <= 0 || !Number.isInteger(amount)) return res.json({ success: true, ignored: 'invalid_payload' });
+    if (!content || !String(content).trim()) return res.json({ success: true, ignored: 'invalid_payload' });
     const txKey = ref || `${amount}:${content}:${JSON.stringify(payload).slice(0,200)}`;
     if (db.sepayTransactions.some(t => t.key === txKey)) return res.json({ success: true, duplicate: true });
 
@@ -459,10 +475,6 @@ app.post('/api/sepay/webhook', async (req, res) => {
         dep = (db.deposits || [])
           .filter(d => ['Chờ thanh toán','Chờ duyệt'].includes(String(d.status || '')) && d.user_id === user.id && Math.floor(Number(d.amount || 0)) === amount)
           .sort((a,b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
-        if (!dep) {
-          dep = { id: uid('d'), user_id: user.id, amount, content, proof_image: '', status: 'Chờ thanh toán', admin_note: '', created_at: now(), reviewed_at: '', method: 'sepay', sepay_code: '', sepay_qr: '' };
-          db.deposits.push(dep);
-        }
       }
     }
 
@@ -544,7 +556,7 @@ app.patch('/api/admin/deposits/:id', auth, adminOnly, (req, res) => {
 });
 app.get('/api/admin/notifications', auth, adminOnly, (req, res) => res.json(db.notifications.sort((a,b) => b.created_at.localeCompare(a.created_at)).slice(0,100)));
 app.patch('/api/admin/notifications/read', auth, adminOnly, (req, res) => { db.notifications.forEach(n => n.read = 1); saveDb(); res.json({ ok: true }); });
-app.patch('/api/admin/settings', auth, adminOnly, (req, res) => { ['siteName','brandText','logoUrl','adUrl','themeColor','layoutMode','depositInfo','qrImage','apiBaseUrl','apiKey','apiProvider','legacyApiBaseUrl','legacyApiKey','codesimApiBaseUrl','codesimApiKey','otpTimeoutMinutes','sepayBankCode','sepayAccount','sepayAccountName','sepayEnabled'].forEach(k => { if (req.body[k] !== undefined) db.settings[k] = String(req.body[k]); }); saveDb(); res.json(safeSettingsForUser(db.settings, true)); });
+app.patch('/api/admin/settings', auth, adminOnly, (req, res) => { ['siteName','brandText','logoUrl','adUrl','themeColor','layoutMode','depositInfo','qrImage','apiBaseUrl','apiKey','apiProvider','legacyApiBaseUrl','legacyApiKey','codesimApiBaseUrl','codesimApiKey','otpTimeoutMinutes','sepayBankCode','sepayAccount','sepayAccountName','sepayEnabled','sepayWebhookApiKey'].forEach(k => { if (req.body[k] !== undefined) db.settings[k] = String(req.body[k]); }); saveDb(); res.json(safeSettingsForUser(db.settings, true)); });
 app.get('/api/admin/sim-api/account', auth, adminOnly, async (req, res) => {
   try {
     const provider = String(req.query.provider || 'legacy');
