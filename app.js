@@ -9,6 +9,9 @@ let otpPollBusy = false;
 let otpPollCursor = 0;
 let descPollTimer = null;
 let descPollBusy = false;
+let binancePollTimer = null;
+let binancePollBusy = false;
+let binanceCountdownTimer = null;
 
 const $ = s => document.querySelector(s);
 const app = $('#app');
@@ -78,7 +81,7 @@ async function loadPage(){
   startLiveDescriptionPolling();
 }
 async function setTab(t){ tab=t; await loadPage(); }
-function logout(){ stopOtpAutoPolling(); stopLiveDescriptionPolling(); localStorage.removeItem('token'); token=''; me=null; renderAuth(); }
+function logout(){ stopOtpAutoPolling(); stopLiveDescriptionPolling(); stopBinancePolling(); localStorage.removeItem('token'); token=''; me=null; renderAuth(); }
 function renderAuth(){
   app.innerHTML = `<div class="wrap auth card"><h2>${esc(settings.siteName||'Có All Dịch Vụ')}</h2><div id="msg"></div><div class="field"><label>Tài khoản</label><input id="username" placeholder="Nhập tài khoản"></div><div class="field"><label>Mật khẩu</label><input id="password" type="password" placeholder="Nhập mật khẩu"></div><div class="flex"><button onclick="login()">Đăng nhập</button><button class="secondary" onclick="register()">Đăng ký user</button></div></div>`;
 }
@@ -221,9 +224,87 @@ async function adminDmxOrders(){ const d=await api('/api/admin/dmx/orders'); con
 function renderAdminDmxOrders(){ const rows=window._adminDmxOrders||[]; const q=($('#dmxOrderSearch')?.value||'').toLowerCase().trim(); const day=$('#dmxOrderDate')?.value||''; const filtered=rows.filter(o=>(!q||[o.username,o.product_name,o.category].join(' ').toLowerCase().includes(q))&&(!day||String(o.created_at||'').slice(0,10)===day)); $('#dmxOrderTable').innerHTML=tableDmxOrders(filtered,true); }
 
 async function userDeposit(){
+  stopBinancePolling();
   deposits=await api('/api/deposits');
-  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Nạp tiền tự động SePay</h2><p class="muted">Nhập số tiền, tạo QR, chuyển khoản đúng số tiền và đúng nội dung. Hệ thống sẽ tự cộng tiền khi SePay gửi webhook.</p><div class="row"><div class="field"><label>Số tiền muốn nạp</label><input id="autoDepAmount" type="number" min="1000" step="1000" placeholder="VD: 50000"></div><div class="field"><label>Ngân hàng nhận</label><input disabled value="${esc(settings.sepayBankCode||'MB')} - ${esc(settings.sepayAccount||'')}"></div></div><button onclick="createSepayDeposit()">Tạo QR nạp tự động</button><div id="sepayBox"></div></div><div class="card"><h2>Nạp thủ công / dự phòng</h2><div class="row"><div><div class="notice">${esc(settings.depositInfo||'')}</div>${settings.qrImage?`<img class="qr" src="${esc(settings.qrImage)}">`:''}</div><form onsubmit="sendDeposit(event)"><div class="field"><label>Số tiền đã nạp</label><input id="depAmount" type="number" min="1000" required></div><div class="field"><label>Nội dung chuyển khoản</label><input id="depContent" placeholder="VD: nap ${esc(me.username)}"></div><div class="field"><label>Ảnh bill/chứng từ</label><input id="depProof" type="file" accept="image/*"></div><button>Gửi yêu cầu nạp thủ công</button></form></div></div><div class="card"><h2>Lịch sử nạp</h2>${tableDeposits(deposits)}</div>`);
+  const binanceCard = settings.binanceEnabled === '1' ? `<div class="card"><h2>Nạp tiền qua Binance Pay (USDT)</h2><p class="muted">Nhập số VND, hệ thống quy đổi sang USDT theo rate hiện tại. Bạn chuyển USDT qua Binance Pay với đúng nội dung và số USDT, hệ thống sẽ tự cộng tiền sau vài phút.</p><div class="row"><div class="field"><label>Số tiền VND muốn nạp</label><input id="binAmountVnd" type="number" min="1000" step="1000" placeholder="VD: 260000" oninput="renderBinancePreview()"></div><div class="field"><label>Tỉ giá USDT/VND</label><input disabled value="${esc(settings.binanceUsdtVndRate||'')}"></div></div><p class="muted" id="binPreview">Tương đương: 0 USDT</p><p class="muted">Tối thiểu: ${esc(settings.binanceMinUsdt||'1')} USDT - Tối đa: ${esc(settings.binanceMaxUsdt||'10000')} USDT${settings.binancePayeeName?` - Người nhận: <b>${esc(settings.binancePayeeName)}</b>`:''}</p><button onclick="createBinanceDeposit()">Tạo lệnh nạp Binance</button><div id="binanceBox"></div></div>` : '';
+  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Nạp tiền tự động SePay</h2><p class="muted">Nhập số tiền, tạo QR, chuyển khoản đúng số tiền và đúng nội dung. Hệ thống sẽ tự cộng tiền khi SePay gửi webhook.</p><div class="row"><div class="field"><label>Số tiền muốn nạp</label><input id="autoDepAmount" type="number" min="1000" step="1000" placeholder="VD: 50000"></div><div class="field"><label>Ngân hàng nhận</label><input disabled value="${esc(settings.sepayBankCode||'MB')} - ${esc(settings.sepayAccount||'')}"></div></div><button onclick="createSepayDeposit()">Tạo QR nạp tự động</button><div id="sepayBox"></div></div>${binanceCard}<div class="card"><h2>Nạp thủ công / dự phòng</h2><div class="row"><div><div class="notice">${esc(settings.depositInfo||'')}</div>${settings.qrImage?`<img class="qr" src="${esc(settings.qrImage)}">`:''}</div><form onsubmit="sendDeposit(event)"><div class="field"><label>Số tiền đã nạp</label><input id="depAmount" type="number" min="1000" required></div><div class="field"><label>Nội dung chuyển khoản</label><input id="depContent" placeholder="VD: nap ${esc(me.username)}"></div><div class="field"><label>Ảnh bill/chứng từ</label><input id="depProof" type="file" accept="image/*"></div><button>Gửi yêu cầu nạp thủ công</button></form></div></div><div class="card"><h2>Lịch sử nạp</h2>${tableDeposits(deposits)}</div>`);
 }
+function renderBinancePreview(){
+  const el = $('#binAmountVnd'); if(!el) return;
+  const vnd = Math.max(0, Math.floor(Number(el.value || 0)));
+  const rate = Number(settings.binanceUsdtVndRate || 0);
+  const out = $('#binPreview'); if(!out) return;
+  if(!rate || rate <= 0){ out.textContent = 'Rate USDT-VND chưa được cấu hình'; return; }
+  if(!vnd){ out.textContent = 'Tương đương: 0 USDT'; return; }
+  const usdt = Math.ceil(vnd / rate * 100) / 100;
+  out.innerHTML = `Tương đương: <b>${usdt.toFixed(2)} USDT</b> (rate ${Number(rate).toLocaleString('vi-VN')} VND/USDT)`;
+}
+async function createBinanceDeposit(){
+  const vnd = Math.floor(Number($('#binAmountVnd')?.value || 0));
+  if(vnd < 1000) return toast('Số tiền nạp tối thiểu 1.000đ', false);
+  try{
+    const d = await api('/api/deposits/binance',{method:'POST',body:JSON.stringify({vndAmount:vnd})});
+    showBinancePanel(d);
+    deposits = await api('/api/deposits');
+  }catch(e){ toast(e.message,false); }
+}
+function showBinancePanel(d){
+  const box = $('#binanceBox'); if(!box) return;
+  const note = String(d.note || '');
+  const usdt = Number(d.usdtAmount || 0).toFixed(2);
+  const vnd = Number(d.vndAmount || 0);
+  const payee = String(d.payeeName || '');
+  const qr = String(d.qrImage || settings.binanceQrImage || '');
+  const expIso = String(d.expiresAt || '');
+  box.innerHTML = `<div class="notice okbox" style="margin-top:12px"><b>Mở Binance Pay → Send → USDT.</b><br><b>Số USDT cần gửi:</b> <code id="binUsdtTxt">${esc(usdt)}</code> <button class="small secondary" onclick="copyText('${esc(usdt)}','USDT')">Copy USDT</button><br><b>Nội dung (note) bắt buộc:</b> <code id="binNoteTxt">${esc(note)}</code> <button class="small secondary" onclick="copyText('${esc(note)}','nội dung')">Copy nội dung</button>${payee?`<br><b>Người nhận:</b> ${esc(payee)}`:''}<br><b>Số VND sẽ cộng:</b> ${vnd.toLocaleString('vi-VN')}đ<br><b>Hết hạn sau:</b> <span id="binCountdown">--:--</span></div>${qr?`<div style="margin-top:12px;text-align:center"><p class="muted">Quét mã QR Binance Pay bên dưới rồi nhập đúng số USDT và nội dung ở trên:</p><img class="qr" src="${esc(qr)}" alt="Binance Pay QR" style="max-width:280px"></div>`:'<p class="notice err" style="margin-top:12px">Admin chưa upload QR Binance Pay. Hãy nhập tay người nhận và nội dung ở trên.</p>'}<p class="muted">Hệ thống tự kiểm tra mỗi 5 giây. Đừng tắt trang trước khi tiền vào.</p><div id="binStatusMsg"></div>`;
+  startBinanceCountdown(expIso);
+  startBinancePolling(d.id);
+}
+function stopBinanceCountdown(){ if(binanceCountdownTimer){ clearInterval(binanceCountdownTimer); binanceCountdownTimer=null; } }
+function startBinanceCountdown(expIso){
+  stopBinanceCountdown();
+  const exp = new Date(expIso).getTime();
+  function tick(){
+    const el = $('#binCountdown'); if(!el){ stopBinanceCountdown(); return; }
+    const remain = Math.max(0, Math.floor((exp - Date.now())/1000));
+    const mm = String(Math.floor(remain/60)).padStart(2,'0');
+    const ss = String(remain%60).padStart(2,'0');
+    el.textContent = mm+':'+ss;
+    if(remain <= 0){ stopBinanceCountdown(); }
+  }
+  tick();
+  binanceCountdownTimer = setInterval(tick, 1000);
+}
+function stopBinancePolling(){ if(binancePollTimer){ clearInterval(binancePollTimer); binancePollTimer=null; } stopBinanceCountdown(); }
+function startBinancePolling(depId){
+  stopBinancePolling();
+  if(!depId) return;
+  const target = depId;
+  binancePollTimer = setInterval(()=>pollBinanceOnce(target), 5000);
+  setTimeout(()=>pollBinanceOnce(target), 1500);
+}
+async function pollBinanceOnce(depId){
+  if(binancePollBusy) return;
+  binancePollBusy = true;
+  try{
+    const d = await api('/api/deposits/binance/'+encodeURIComponent(depId)+'/status');
+    const msg = $('#binStatusMsg');
+    if(d.status === 'paid'){
+      stopBinancePolling();
+      if(msg) msg.innerHTML = `<div class="notice okbox">Đã nhận USDT — đã cộng ${Number(d.vndAmount||0).toLocaleString('vi-VN')}đ vào số dư. Mã giao dịch: ${esc(d.txId||'')}</div>`;
+      toast('Nạp Binance Pay thành công');
+      await loadMe();
+      tab='history';
+      await loadPage();
+    } else if(d.status === 'expired'){
+      stopBinancePolling();
+      if(msg) msg.innerHTML = `<div class="notice err">Lệnh nạp đã hết hạn. Vui lòng tạo lệnh mới hoặc liên hệ admin nếu bạn đã chuyển USDT.</div>`;
+    }
+  }catch(e){
+    // im lặng để không spam toast
+  }finally{ binancePollBusy = false; }
+}
+
 async function createSepayDeposit(){
   const amount = Math.floor(Number($('#autoDepAmount')?.value || 0));
   if(amount < 1000) return toast('Số tiền nạp tối thiểu 1.000đ', false);
@@ -254,7 +335,57 @@ async function syncApiApps(){ try{ const d=await api('/api/admin/sim-api/sync-ap
 async function delService(id){ if(confirm('Xóa dịch vụ này?')){ await api('/api/admin/services/'+id,{method:'DELETE'}); await loadPage(); } }
 async function adminHistory(){ adminRentals=await api('/api/admin/rentals'); const dmx=await api('/api/admin/dmx/orders').catch(()=>({rows:[],stats:{}})); $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Admin - Tất cả lịch sử thuê</h2><div class="tablewrap"><table class="table"><tr><th>User</th><th>Dịch vụ</th><th>Nhà mạng</th><th>Số sim</th><th>Giá</th><th>Trạng thái</th><th>OTP</th><th>Thời gian</th><th>Lưu</th></tr>${adminRentals.map(r=>`<tr><td>${esc(r.username)}</td><td>${esc(r.service_name)}</td><td>${esc(r.network)}</td><td>${esc(r.phone_number)}</td><td>${fmt(r.price)}</td><td><input id="rs_${r.id}" value="${esc(r.status)}"></td><td><input id="otp_${r.id}" value="${esc(r.otp_code||'')}"></td><td>${date(r.rented_at)}</td><td><button class="small" onclick="saveRental('${r.id}')">Lưu</button></td></tr>`).join('')}</table></div></div><div class="card"><h2>Admin - Lịch sử mua DMX</h2><div class="stats"><span class="pill">Tổng đơn: <b>${dmx.stats?.totalOrders||0}</b></span><span class="pill">Doanh thu: <b>${fmt(dmx.stats?.revenue||0)}</b></span></div>${tableDmxOrders(dmx.rows||[],true)}</div>`); }
 async function saveRental(id){ await api('/api/admin/rentals/'+id,{method:'PATCH',body:JSON.stringify({status:$('#rs_'+id).value,otp_code:$('#otp_'+id).value})}); toast('Đã lưu lượt thuê'); }
-async function adminDepositInfo(){ $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Admin - Thông tin nhận tiền nạp</h2><div class="field"><label>Thông tin chuyển khoản thủ công</label><textarea id="depositInfo">${esc(settings.depositInfo||'')}</textarea></div><div class="field"><label>Ảnh QR thủ công hiện tại</label><br>${settings.qrImage?`<img class="qr" src="${esc(settings.qrImage)}">`:''}</div><div class="field"><label>Tải QR thủ công mới</label><input id="qrFile" type="file" accept="image/*"></div><h3>Cấu hình SePay tự động</h3><div class="row3"><div class="field"><label>Mã ngân hàng VietQR</label><input id="sepayBankCode" value="${esc(settings.sepayBankCode||'MB')}"></div><div class="field"><label>Số tài khoản</label><input id="sepayAccount" value="${esc(settings.sepayAccount||'')}"></div><div class="field"><label>Tên chủ tài khoản</label><input id="sepayAccountName" value="${esc(settings.sepayAccountName||'')}"></div></div><div class="field"><label>API Key Webhook SePay</label><input id="sepayWebhookApiKey" value="${esc(settings.sepayWebhookApiKey||'')}" placeholder="Nhập API key từ SePay.vn"></div><small class="muted">Lấy API key từ trang quản lý SePay → Webhook → API Key. Bắt buộc phải cấu hình để webhook hoạt động.</small><p class="notice">Webhook SePay cần trỏ tới: <b>${location.origin}/api/sepay/webhook</b></p><button onclick="saveDepositInfo()">Lưu thông tin nạp</button></div>`); }
+async function adminDepositInfo(){ const keyFromEnv=settings.binanceApiKeyFromEnv===true; const secretFromEnv=settings.binanceApiSecretFromEnv===true; const keyDisabled=keyFromEnv?'disabled':''; const secretDisabled=secretFromEnv?'disabled':''; const keyHint=keyFromEnv?'<small class="muted">🔒 Đang đọc từ biến môi trường <code>BINANCE_API_KEY</code> — không thể sửa từ web</small>':''; const secretHint=secretFromEnv?'<small class="muted">🔒 Đang đọc từ biến môi trường <code>BINANCE_API_SECRET</code> — không thể sửa từ web</small>':''; $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Admin - Thông tin nhận tiền nạp</h2><div class="field"><label>Thông tin chuyển khoản thủ công</label><textarea id="depositInfo">${esc(settings.depositInfo||'')}</textarea></div><div class="field"><label>Ảnh QR thủ công hiện tại</label><br>${settings.qrImage?`<img class="qr" src="${esc(settings.qrImage)}">`:''}</div><div class="field"><label>Tải QR thủ công mới</label><input id="qrFile" type="file" accept="image/*"></div><h3>Cấu hình SePay tự động</h3><div class="row3"><div class="field"><label>Mã ngân hàng VietQR</label><input id="sepayBankCode" value="${esc(settings.sepayBankCode||'MB')}"></div><div class="field"><label>Số tài khoản</label><input id="sepayAccount" value="${esc(settings.sepayAccount||'')}"></div><div class="field"><label>Tên chủ tài khoản</label><input id="sepayAccountName" value="${esc(settings.sepayAccountName||'')}"></div></div><div class="field"><label>API Key Webhook SePay</label><input id="sepayWebhookApiKey" value="${esc(settings.sepayWebhookApiKey||'')}" placeholder="Nhập API key từ SePay.vn"></div><small class="muted">Lấy API key từ trang quản lý SePay → Webhook → API Key. Bắt buộc phải cấu hình để webhook hoạt động.</small><p class="notice">Webhook SePay cần trỏ tới: <b>${location.origin}/api/sepay/webhook</b></p><button onclick="saveDepositInfo()">Lưu thông tin nạp</button></div><div class="card"><h2>Cấu hình Binance Pay</h2><div class="row3"><div class="field"><label>Bật Binance Pay</label><select id="binanceEnabled"><option value="0">Tắt</option><option value="1" ${settings.binanceEnabled==='1'?'selected':''}>Bật</option></select></div><div class="field"><label>Tỉ giá USDT/VND</label><input id="binanceUsdtVndRate" type="number" min="0" value="${esc(settings.binanceUsdtVndRate||'26000')}"></div><div class="field"><label>Prefix nội dung (2-10 ký tự HOA)</label><input id="binanceContentPrefix" value="${esc(settings.binanceContentPrefix||'BNCDV')}" oninput="this.value=this.value.toUpperCase()" maxlength="10"></div></div><div class="row"><div class="field"><label>Binance API Key</label><input id="binanceApiKey" ${keyDisabled} value="${keyFromEnv?'':esc(settings.binanceApiKey||'')}" placeholder="${keyFromEnv?'(từ biến môi trường)':'Lấy từ Binance API Management'}">${keyHint}</div><div class="field"><label>Binance API Secret</label><input id="binanceApiSecret" type="password" ${secretDisabled} value="${secretFromEnv?'':esc(settings.binanceApiSecret||'')}" placeholder="${secretFromEnv?'(từ biến môi trường)':'Bí mật, không chia sẻ'}">${secretHint}</div></div><p class="muted">Hiện tại: API Key ${esc(settings.binanceApiKeyMasked||'Chưa cài')} - API Secret ${esc(settings.binanceApiSecretMasked||'Chưa cài')}</p><div class="row3"><div class="field"><label>Min USDT</label><input id="binanceMinUsdt" type="number" min="0" value="${esc(settings.binanceMinUsdt||'1')}"></div><div class="field"><label>Max USDT</label><input id="binanceMaxUsdt" type="number" min="0" value="${esc(settings.binanceMaxUsdt||'10000')}"></div><div class="field"><label>Hết hạn (phút)</label><input id="binanceExpiryMinutes" type="number" min="1" value="${esc(settings.binanceExpiryMinutes||'30')}"></div></div><div class="field"><label>Tên người nhận hiển thị cho user</label><input id="binancePayeeName" value="${esc(settings.binancePayeeName||'')}" placeholder="VD: Nguyen Van A"></div><div class="field"><label>Ảnh QR Binance Pay hiện tại</label><br>${settings.binanceQrImage?`<img class="qr" src="${esc(settings.binanceQrImage)}">`:'<p class="muted">Chưa có QR. Hãy tải lên ảnh QR Binance Pay của bạn.</p>'}</div><div class="field"><label>Tải QR Binance Pay mới (lấy từ app Binance → Pay → My QR)</label><input id="binanceQrFile" type="file" accept="image/*"></div><div class="flex"><button onclick="saveBinanceSettings()">Lưu cấu hình Binance</button><button class="secondary" onclick="testBinanceApi()">Test API kết nối</button><button class="secondary" onclick="checkBinanceNow()">Quét giao dịch ngay</button></div><div id="binanceAdminResult" class="notice" style="white-space:pre-wrap;margin-top:12px"></div><h3 style="margin-top:18px">Lịch sử giao dịch Binance đã xử lý</h3><div id="binanceTxList"><p class="muted">Bấm "Quét giao dịch ngay" hoặc "Tải lịch sử" để xem.</p></div><button class="secondary" onclick="loadBinanceTransactions()">Tải lịch sử</button></div>`); }
+async function saveBinanceSettings(){
+  const prefixRaw = String($('#binanceContentPrefix').value || '').trim().toUpperCase();
+  if(!/^[A-Z0-9]{2,10}$/.test(prefixRaw)){ toast('Prefix phải là 2-10 ký tự alphanumeric viết hoa', false); return; }
+  try{
+    let qrUrl = settings.binanceQrImage || '';
+    const qrFile = $('#binanceQrFile');
+    if(qrFile && qrFile.files && qrFile.files[0]) qrUrl = await uploadFile(qrFile);
+    const payload = {
+      binanceEnabled: $('#binanceEnabled').value,
+      binanceUsdtVndRate: $('#binanceUsdtVndRate').value,
+      binanceContentPrefix: prefixRaw,
+      binanceMinUsdt: $('#binanceMinUsdt').value,
+      binanceMaxUsdt: $('#binanceMaxUsdt').value,
+      binancePayeeName: $('#binancePayeeName').value,
+      binanceExpiryMinutes: $('#binanceExpiryMinutes').value,
+      binanceQrImage: qrUrl
+    };
+    if(settings.binanceApiKeyFromEnv !== true) payload.binanceApiKey = $('#binanceApiKey').value;
+    if(settings.binanceApiSecretFromEnv !== true) payload.binanceApiSecret = $('#binanceApiSecret').value;
+    settings = await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify(payload)});
+    toast('Đã lưu cấu hình Binance');
+    await loadPage();
+  }catch(e){ toast(e.message, false); }
+}
+async function testBinanceApi(){
+  const out = $('#binanceAdminResult'); if(out) out.textContent = 'Đang kiểm tra...';
+  try{
+    const d = await api('/api/admin/binance/test',{method:'POST',body:JSON.stringify({})});
+    if(out) out.textContent = JSON.stringify(d, null, 2);
+    toast(d.ok ? 'Test API Binance OK' : ('Test fail: ' + (d.error || d.code || 'lỗi không rõ')), !!d.ok);
+  }catch(e){ if(out) out.textContent = e.message; toast(e.message, false); }
+}
+async function checkBinanceNow(){
+  const out = $('#binanceAdminResult'); if(out) out.textContent = 'Đang quét...';
+  try{
+    const d = await api('/api/admin/binance/check-now',{method:'POST',body:JSON.stringify({})});
+    if(out) out.textContent = JSON.stringify(d, null, 2);
+    toast(`Quét xong: matched=${d.matched||0}, expired=${d.expired||0}, errors=${(d.errors||[]).length}`);
+    await loadBinanceTransactions();
+  }catch(e){ if(out) out.textContent = e.message; toast(e.message, false); }
+}
+async function loadBinanceTransactions(){
+  const box = $('#binanceTxList'); if(!box) return;
+  box.innerHTML = '<p class="muted">Đang tải...</p>';
+  try{
+    const rows = await api('/api/admin/binance/transactions');
+    if(!Array.isArray(rows) || !rows.length){ box.innerHTML = '<p class="muted">Chưa có giao dịch Binance nào được xử lý.</p>'; return; }
+    box.innerHTML = `<div class="tablewrap"><table class="table"><tr><th>Thời gian</th><th>User</th><th>Note</th><th>USDT</th><th>VND</th><th>Tỉ giá</th><th>Người gửi</th><th>Tx ID</th></tr>${rows.map(t=>`<tr><td>${date(t.createdAt)}</td><td>${esc(t.username||'')}</td><td><code>${esc(t.note||'')}</code></td><td>${esc(Number(t.usdtAmount||0).toFixed(2))}</td><td>${fmt(t.vndAmount||0)}</td><td>${esc(String(t.rate||''))}</td><td>${esc(t.payerName||'')}</td><td><code>${esc(t.transactionId||'')}</code></td></tr>`).join('')}</table></div>`;
+  }catch(e){ box.innerHTML = '<p class="notice err">'+esc(e.message)+'</p>'; }
+}
 async function uploadFile(input){ if(!input.files[0]) return ''; const fd=new FormData(); fd.append('file',input.files[0]); const d=await api('/api/upload',{method:'POST',body:fd}); return d.url; }
 async function saveDepositInfo(){ let qr=settings.qrImage||''; const f=$('#qrFile'); if(f.files[0]) qr=await uploadFile(f); settings=await api('/api/admin/settings',{method:'PATCH',body:JSON.stringify({depositInfo:$('#depositInfo').value,qrImage:qr,sepayBankCode:$('#sepayBankCode').value,sepayAccount:$('#sepayAccount').value,sepayAccountName:$('#sepayAccountName').value,sepayWebhookApiKey:$('#sepayWebhookApiKey').value})}); toast('Đã lưu thông tin nạp'); await loadPage(); }
 async function adminUsers(){ users=await api('/api/admin/users'); $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Admin - Quản lý người dùng</h2><div class="field"><label>Tìm kiếm người dùng</label><input id="userSearch" placeholder="Nhập username, quyền hoặc trạng thái" oninput="renderUserTable()"></div><div id="userTable">${tableUsers(users)}</div></div>`); }

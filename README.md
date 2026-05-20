@@ -2,6 +2,21 @@
 
 Bản này khác bản HTML cũ: có **backend Node.js + SQLite database** nên nhiều người dùng có thể đăng nhập cùng một web và dùng chung dữ liệu.
 
+## Nạp tiền qua Binance Pay (USDT)
+
+Hệ thống hỗ trợ nạp tự động bằng USDT qua Binance Pay (ngoài SePay VietQR và nạp thủ công):
+
+1. Vào tab **Nạp tiền admin** trên giao diện admin → cuộn xuống mục **Cấu hình Binance Pay**.
+2. Bật `binanceEnabled = 1`, dán `binanceApiKey` và `binanceApiSecret` (lấy từ Binance → API Management). Có thể đặt sẵn vào biến môi trường `BINANCE_API_KEY`, `BINANCE_API_SECRET` để fallback.
+3. Đặt `binanceUsdtVndRate` (rate USDT-VND admin tự nhập, hệ thống không fetch P2P), `binanceContentPrefix` (2-10 ký tự HOA, mặc định `BNCDV`), min/max USDT, tên người nhận, thời gian hết hạn (mặc định 30 phút).
+4. Bấm **Test API kết nối** để kiểm tra HMAC + đồng hồ. Bấm **Quét giao dịch ngay** để chạy worker thủ công khi cần.
+5. User vào tab Nạp tiền sẽ thấy thẻ "Nạp tiền qua Binance Pay (USDT)": nhập VND → hệ thống quy đổi USDT theo rate hiện tại → tạo lệnh nạp với note duy nhất → user gửi USDT đúng số và đúng note qua Binance Pay → worker tự cộng tiền sau vài phút.
+
+Bảo mật:
+- `binanceApiKey` và `binanceApiSecret` chỉ trả về cho admin trong `GET /api/settings`. User thường không thấy 2 trường này.
+- Mỗi giao dịch Binance đã xử lý lưu vào `db.binanceTransactions` với `transactionId` để chống double-credit.
+- Lệnh nạp quá hạn tự động được đánh dấu `Hết hạn` ở mỗi tick worker.
+
 ## Tài khoản admin mặc định
 
 - Tài khoản: `hungnbyt`

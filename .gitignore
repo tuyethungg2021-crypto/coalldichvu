@@ -5,3 +5,6 @@ data/*.json
 !data/.gitkeep
 uploads/*
 !uploads/.gitkeep
+openspec/
+.DS_Store
+*.log

@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
@@ -49,7 +50,7 @@ function daysInactive(u) {
 }
 
 const defaults = {
-  users: [], services: [], rentals: [], deposits: [], notifications: [], dmxProducts: [], dmxOrders: [], sepayTransactions: [],
+  users: [], services: [], rentals: [], deposits: [], notifications: [], dmxProducts: [], dmxOrders: [], sepayTransactions: [], binanceTransactions: [],
   settings: {
     siteName: 'Có All Dịch Vụ',
     brandText: 'Thuê sim nhanh - nhiều nhà mạng - quản lý dễ dàng',
@@ -68,14 +69,26 @@ const defaults = {
     apiProvider: 'legacy',
     apiKey: '248c26ea0cd1371009db5dd443339ca1',
     otpTimeoutMinutes: '20',
-    sepayWebhookApiKey: process.env.SEPAY_WEBHOOK_API_KEY || ''
+    sepayWebhookApiKey: process.env.SEPAY_WEBHOOK_API_KEY || '',
+    binanceEnabled: '0',
+    binanceApiKey: '',
+    binanceApiSecret: '',
+    binanceUsdtVndRate: '26000',
+    binanceContentPrefix: 'BNCDV',
+    binanceMinUsdt: '1',
+    binanceMaxUsdt: '10000',
+    binancePayeeName: '',
+    binanceExpiryMinutes: '30',
+    binanceQrImage: '',
+    binanceLastPolledAt: 0,
+    binanceNextNoteId: 1
   }
 };
 let db = null;
 
 function normalizeDb(parsed) {
   parsed = parsed || {};
-  return { ...defaults, ...parsed, dmxProducts: parsed.dmxProducts || [], dmxOrders: parsed.dmxOrders || [], sepayTransactions: parsed.sepayTransactions || [], settings: { ...defaults.settings, ...(parsed.settings || {}) } };
+  return { ...defaults, ...parsed, dmxProducts: parsed.dmxProducts || [], dmxOrders: parsed.dmxOrders || [], sepayTransactions: parsed.sepayTransactions || [], binanceTransactions: parsed.binanceTransactions || [], settings: { ...defaults.settings, ...(parsed.settings || {}) } };
 }
 async function loadDb() {
   if (MONGODB_URI) {
@@ -271,12 +284,58 @@ async function processExpiredRentals() {
 }
 function safeSettingsForUser(settings, isAdmin) {
   const out = { ...settings };
-  if (!isAdmin) { delete out.apiKey; delete out.legacyApiKey; delete out.codesimApiKey; delete out.sepayWebhookApiKey; }
+  if (!isAdmin) { delete out.apiKey; delete out.legacyApiKey; delete out.codesimApiKey; delete out.sepayWebhookApiKey; delete out.binanceApiKey; delete out.binanceApiSecret; }
   if (isAdmin && out.legacyApiKey) out.legacyApiKeyMasked = out.legacyApiKey.slice(0, 6) + '...' + out.legacyApiKey.slice(-4);
   if (isAdmin && out.codesimApiKey) out.codesimApiKeyMasked = out.codesimApiKey.slice(0, 6) + '...' + out.codesimApiKey.slice(-4);
   if (isAdmin && out.apiKey) out.apiKeyMasked = out.apiKey.slice(0, 6) + '...' + out.apiKey.slice(-4);
   if (isAdmin && out.sepayWebhookApiKey) out.sepayWebhookApiKeyMasked = out.sepayWebhookApiKey.slice(0, 6) + '...' + out.sepayWebhookApiKey.slice(-4);
+  if (isAdmin) {
+    const effKey = (typeof getBinanceApiKey === 'function') ? getBinanceApiKey() : '';
+    const effSecret = (typeof getBinanceApiSecret === 'function') ? getBinanceApiSecret() : '';
+    if (effKey) out.binanceApiKeyMasked = effKey.slice(0, 6) + '...' + effKey.slice(-4);
+    if (effSecret) out.binanceApiSecretMasked = effSecret.slice(0, 6) + '...' + effSecret.slice(-4);
+    out.binanceApiKeyFromEnv = (typeof isBinanceApiKeyFromEnv === 'function') ? isBinanceApiKeyFromEnv() : false;
+    out.binanceApiSecretFromEnv = (typeof isBinanceApiSecretFromEnv === 'function') ? isBinanceApiSecretFromEnv() : false;
+  }
   return out;
+}
+
+function getBinanceApiKey() {
+  return String(process.env.BINANCE_API_KEY || (db && db.settings && db.settings.binanceApiKey) || '').trim();
+}
+function getBinanceApiSecret() {
+  return String(process.env.BINANCE_API_SECRET || (db && db.settings && db.settings.binanceApiSecret) || '').trim();
+}
+function isBinanceApiKeyFromEnv() {
+  return !!String(process.env.BINANCE_API_KEY || '').trim();
+}
+function isBinanceApiSecretFromEnv() {
+  return !!String(process.env.BINANCE_API_SECRET || '').trim();
+}
+function escapeRegex(str) {
+  return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+async function signedBinanceRequest(reqPath, params = {}) {
+  const apiKey = getBinanceApiKey();
+  const apiSecret = getBinanceApiSecret();
+  if (!apiKey || !apiSecret) return { ok: false, code: -1, msg: 'Binance API key/secret chưa cấu hình' };
+  const merged = { ...params, recvWindow: 5000, timestamp: Date.now() };
+  const qs = Object.entries(merged)
+    .filter(([, v]) => v !== undefined && v !== null && String(v) !== '')
+    .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(String(v)))
+    .join('&');
+  const signature = crypto.createHmac('sha256', apiSecret).update(qs).digest('hex');
+  const url = 'https://api.binance.com' + reqPath + '?' + qs + '&signature=' + signature;
+  try {
+    const r = await fetch(url, { method: 'GET', headers: { 'X-MBX-APIKEY': apiKey, 'Accept': 'application/json' } });
+    const text = await r.text();
+    let data;
+    try { data = JSON.parse(text); } catch { return { ok: false, code: r.status, msg: 'Binance trả về không phải JSON: ' + text.slice(0, 200) }; }
+    if (!r.ok) return { ok: false, code: data.code || r.status, msg: data.msg || ('HTTP ' + r.status) };
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, code: -2, msg: e.message || 'Network error' };
+  }
 }
 
 app.get('/api/health', (req, res) => res.json({ ok: true, app: 'Có All Dịch Vụ', db: stateCollection ? 'mongodb' : 'json', cloudinary: useCloudinary, time: now() }));
@@ -488,6 +547,228 @@ app.post('/api/sepay/webhook', async (req, res) => {
   }
 });
 
+// ---------- Binance Pay deposit ----------
+function getBinanceConfig() {
+  const s = (db && db.settings) || {};
+  return {
+    enabled: String(s.binanceEnabled || '0') === '1',
+    apiKey: getBinanceApiKey(),
+    apiSecret: getBinanceApiSecret(),
+    rate: Number(s.binanceUsdtVndRate || 0),
+    prefix: String(s.binanceContentPrefix || 'BNCDV').trim().toUpperCase(),
+    minUsdt: Number(s.binanceMinUsdt || 0),
+    maxUsdt: Number(s.binanceMaxUsdt || 0),
+    payeeName: String(s.binancePayeeName || ''),
+    expiryMinutes: Math.max(1, Math.floor(Number(s.binanceExpiryMinutes || 30))),
+    nextNoteId: Math.max(1, Math.floor(Number(s.binanceNextNoteId || 1)))
+  };
+}
+function binanceStatusOf(dep) {
+  if (!dep) return 'unknown';
+  const s = String(dep.status || '');
+  if (s === 'Đã duyệt') return 'paid';
+  if (s === 'Hết hạn') return 'expired';
+  return 'pending';
+}
+let binanceWorkerStarted = false;
+let binanceWorkerHandle = null;
+let binanceWorkerBusy = false;
+
+app.post('/api/deposits/binance', auth, async (req, res) => {
+  try {
+    const cfg = getBinanceConfig();
+    if (!cfg.enabled) return res.status(400).json({ error: 'Binance Pay đang tắt' });
+    if (!cfg.apiKey || !cfg.apiSecret) return res.status(400).json({ error: 'Binance API key/secret chưa cấu hình' });
+    if (!cfg.rate || cfg.rate <= 0) return res.status(400).json({ error: 'Rate USDT-VND chưa được cấu hình' });
+    if (!/^[A-Z0-9]{2,10}$/.test(cfg.prefix)) return res.status(400).json({ error: 'Prefix nội dung Binance chưa hợp lệ' });
+    const vnd = Math.floor(Number(req.body.vndAmount ?? req.body.amount ?? 0));
+    if (!vnd || vnd <= 0) return res.status(400).json({ error: 'Số tiền nạp không hợp lệ' });
+    const usdtAmount = Math.ceil((vnd / cfg.rate) * 100) / 100;
+    if (cfg.minUsdt > 0 && usdtAmount < cfg.minUsdt) return res.status(400).json({ error: `Số USDT phải tối thiểu ${cfg.minUsdt}` });
+    if (cfg.maxUsdt > 0 && usdtAmount > cfg.maxUsdt) return res.status(400).json({ error: `Số USDT vượt quá tối đa ${cfg.maxUsdt}` });
+    const noteId = cfg.nextNoteId;
+    db.settings.binanceNextNoteId = noteId + 1;
+    const note = cfg.prefix + String(noteId);
+    const expiresAt = new Date(Date.now() + cfg.expiryMinutes * 60 * 1000).toISOString();
+    const dep = {
+      id: uid('d'), user_id: req.user.id, amount: vnd, content: note, proof_image: '',
+      status: 'Chờ thanh toán', admin_note: 'Đang chờ Binance xác nhận',
+      created_at: now(), reviewed_at: '',
+      method: 'binance',
+      usdt_amount: usdtAmount,
+      rate_used: cfg.rate,
+      binance_note: note,
+      binance_note_id: noteId,
+      binance_tx_id: '',
+      expires_at: expiresAt
+    };
+    db.deposits.push(dep);
+    saveDb();
+    res.json({
+      deposit: dep,
+      id: dep.id,
+      note,
+      usdtAmount,
+      rate: cfg.rate,
+      payeeName: cfg.payeeName,
+      qrImage: String(db.settings.binanceQrImage || ''),
+      expiresAt,
+      vndAmount: vnd
+    });
+  } catch (e) { res.status(500).json({ error: e.message || 'Không tạo được lệnh nạp Binance' }); }
+});
+
+app.get('/api/deposits/binance/:id/status', auth, (req, res) => {
+  const dep = db.deposits.find(d => d.id === req.params.id);
+  if (!dep) return res.status(404).json({ error: 'Không tìm thấy lệnh nạp' });
+  if (dep.user_id !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'Không có quyền xem lệnh nạp này' });
+  if (dep.method !== 'binance') return res.status(400).json({ error: 'Lệnh nạp này không phải Binance' });
+  const status = binanceStatusOf(dep);
+  const out = { status, expiresAt: dep.expires_at || '' };
+  if (status === 'paid') {
+    out.vndAmount = Number(dep.amount || 0);
+    out.usdtAmount = Number(dep.usdt_amount || 0);
+    out.txId = dep.binance_tx_id || '';
+  }
+  res.json(out);
+});
+
+async function processBinancePayments() {
+  if (binanceWorkerBusy) return { matched: 0, expired: 0, errors: ['busy'] };
+  binanceWorkerBusy = true;
+  const summary = { matched: 0, expired: 0, errors: [] };
+  try {
+    const cfg = getBinanceConfig();
+    // Expiry sweep always runs (independent of API config)
+    const nowMs = Date.now();
+    let changed = false;
+    for (const d of db.deposits || []) {
+      if (d.method === 'binance' && d.status === 'Chờ thanh toán' && d.expires_at) {
+        const t = new Date(d.expires_at).getTime();
+        if (Number.isFinite(t) && nowMs > t) {
+          d.status = 'Hết hạn';
+          d.admin_note = 'Tự động hết hạn (Binance không nhận được tx khớp)';
+          d.reviewed_at = now();
+          summary.expired++;
+          changed = true;
+        }
+      }
+    }
+
+    if (!cfg.enabled) {
+      if (changed) saveDb();
+      return summary;
+    }
+    if (!cfg.apiKey || !cfg.apiSecret) {
+      summary.errors.push('Thiếu apiKey/apiSecret');
+      if (changed) saveDb();
+      return summary;
+    }
+    if (!cfg.rate || cfg.rate <= 0) {
+      summary.errors.push('Thiếu rate USDT-VND');
+      if (changed) saveDb();
+      return summary;
+    }
+
+    const last = Number(db.settings.binanceLastPolledAt || 0);
+    const fallback = nowMs - 24 * 60 * 60 * 1000;
+    const startTime = Math.max(0, (last || fallback) - 5 * 60 * 1000);
+    const endTime = nowMs;
+    const result = await signedBinanceRequest('/sapi/v1/pay/transactions', { startTime, endTime, limit: 100 });
+    if (!result.ok) {
+      summary.errors.push('Binance API: ' + (result.msg || result.code));
+      if (changed) saveDb();
+      return summary;
+    }
+    db.settings.binanceLastPolledAt = endTime;
+    changed = true;
+
+    const list = (result.data && Array.isArray(result.data.data)) ? result.data.data : [];
+    db.binanceTransactions = db.binanceTransactions || [];
+    const prefixRe = new RegExp('^' + escapeRegex(cfg.prefix) + '(\\d+)$', 'i');
+
+    for (const tx of list) {
+      try {
+        const currency = String(tx.currency || tx.coin || tx.fiatCurrency || '').toUpperCase();
+        if (currency !== 'USDT') continue;
+        const transactionId = String(tx.transactionId || tx.orderId || tx.tradeId || tx.id || '');
+        if (!transactionId) continue;
+        if (db.binanceTransactions.some(t => String(t.transactionId) === transactionId)) continue;
+        const noteRaw = String(tx.transactionAttribute && tx.transactionAttribute.note ? tx.transactionAttribute.note : (tx.note || tx.message || tx.remark || tx.payerNote || tx.fundsDetail || ''));
+        const m = noteRaw.match(prefixRe);
+        if (!m) continue;
+        const noteIdNum = Number(m[1]);
+        const usdtParsed = Number(tx.amount || tx.totalAmount || tx.transactionAmount || 0);
+        if (!Number.isFinite(usdtParsed) || usdtParsed <= 0) continue;
+        const dep = (db.deposits || []).find(d =>
+          d.method === 'binance' &&
+          d.status === 'Chờ thanh toán' &&
+          Number(d.binance_note_id) === noteIdNum &&
+          Math.abs(Number(d.usdt_amount || 0) - usdtParsed) <= 0.01
+        );
+        if (!dep) continue;
+        const user = db.users.find(u => u.id === dep.user_id);
+        if (!user) continue;
+        const vndCredit = Math.floor(Number(dep.amount || 0));
+        user.balance = Math.floor(Number(user.balance || 0) + vndCredit);
+        dep.status = 'Đã duyệt';
+        dep.admin_note = 'Tự động cộng tiền qua Binance Pay (' + transactionId + ')';
+        dep.reviewed_at = now();
+        dep.binance_tx_id = transactionId;
+        db.binanceTransactions.push({
+          transactionId,
+          depositId: dep.id,
+          userId: user.id,
+          username: user.username,
+          usdtAmount: usdtParsed,
+          vndAmount: vndCredit,
+          rate: Number(dep.rate_used || cfg.rate),
+          payerName: String(tx.payerName || tx.counterparty || tx.payerInfo && tx.payerInfo.name || ''),
+          note: noteRaw,
+          createdAt: now(),
+          raw: tx
+        });
+        db.notifications.push({ id: uid('n'), type: 'deposit_auto', message: `Đã tự cộng ${vndCredit.toLocaleString('vi-VN')}đ cho ${user.username || 'user'} qua Binance Pay`, read: 0, created_at: now() });
+        summary.matched++;
+        changed = true;
+      } catch (innerErr) {
+        summary.errors.push('Tx error: ' + (innerErr.message || innerErr));
+      }
+    }
+
+    if (changed) saveDb();
+    return summary;
+  } catch (e) {
+    console.error('BINANCE WORKER ERROR:', e);
+    summary.errors.push(e.message || String(e));
+    return summary;
+  } finally {
+    binanceWorkerBusy = false;
+  }
+}
+
+app.post('/api/admin/binance/check-now', auth, adminOnly, async (req, res) => {
+  try {
+    const out = await processBinancePayments();
+    res.json({ ok: true, ...out });
+  } catch (e) { res.status(500).json({ error: e.message || 'Không quét được Binance' }); }
+});
+app.get('/api/admin/binance/transactions', auth, adminOnly, (req, res) => {
+  const rows = (db.binanceTransactions || []).slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  res.json(rows);
+});
+app.post('/api/admin/binance/test', auth, adminOnly, async (req, res) => {
+  try {
+    const cfg = getBinanceConfig();
+    if (!cfg.apiKey || !cfg.apiSecret) return res.json({ ok: false, error: 'Chưa cấu hình apiKey/apiSecret' });
+    const endTime = Date.now();
+    const startTime = endTime - 24 * 60 * 60 * 1000;
+    const out = await signedBinanceRequest('/sapi/v1/pay/transactions', { startTime, endTime, limit: 1 });
+    if (out.ok) return res.json({ ok: true, code: out.data && out.data.code, msg: out.data && out.data.message, sample: (out.data && Array.isArray(out.data.data)) ? out.data.data.slice(0, 1) : [] });
+    return res.json({ ok: false, code: out.code, error: out.msg });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message || 'Không gọi được Binance API' }); }
+});
+
 app.post('/api/deposits', auth, upload.single('proof'), async (req, res) => {
   try {
     const amount = Math.floor(Number(req.body.amount || 0));
@@ -556,7 +837,33 @@ app.patch('/api/admin/deposits/:id', auth, adminOnly, (req, res) => {
 });
 app.get('/api/admin/notifications', auth, adminOnly, (req, res) => res.json(db.notifications.sort((a,b) => b.created_at.localeCompare(a.created_at)).slice(0,100)));
 app.patch('/api/admin/notifications/read', auth, adminOnly, (req, res) => { db.notifications.forEach(n => n.read = 1); saveDb(); res.json({ ok: true }); });
-app.patch('/api/admin/settings', auth, adminOnly, (req, res) => { ['siteName','brandText','logoUrl','adUrl','themeColor','layoutMode','depositInfo','qrImage','apiBaseUrl','apiKey','apiProvider','legacyApiBaseUrl','legacyApiKey','codesimApiBaseUrl','codesimApiKey','otpTimeoutMinutes','sepayBankCode','sepayAccount','sepayAccountName','sepayEnabled','sepayWebhookApiKey'].forEach(k => { if (req.body[k] !== undefined) db.settings[k] = String(req.body[k]); }); saveDb(); res.json(safeSettingsForUser(db.settings, true)); });
+app.patch('/api/admin/settings', auth, adminOnly, (req, res) => {
+  if (req.body.binanceContentPrefix !== undefined) {
+    const raw = String(req.body.binanceContentPrefix || '').trim().toUpperCase();
+    if (!/^[A-Z0-9]{2,10}$/.test(raw)) return res.status(400).json({ error: 'Prefix phải là 2-10 ký tự alphanumeric viết hoa' });
+    req.body.binanceContentPrefix = raw;
+  }
+  ['binanceUsdtVndRate','binanceMinUsdt','binanceMaxUsdt'].forEach(k => {
+    if (req.body[k] !== undefined && req.body[k] !== '') {
+      const n = Number(req.body[k]);
+      if (!Number.isFinite(n) || n < 0) {
+        req.body[k + '__invalid'] = true;
+      }
+    }
+  });
+  if (req.body.binanceUsdtVndRate__invalid || req.body.binanceMinUsdt__invalid || req.body.binanceMaxUsdt__invalid) {
+    return res.status(400).json({ error: 'Rate/Min/Max USDT phải là số không âm' });
+  }
+  if (req.body.binanceApiKey !== undefined && isBinanceApiKeyFromEnv()) {
+    return res.status(400).json({ error: 'Binance API key đang lấy từ biến môi trường BINANCE_API_KEY, không thể chỉnh từ web' });
+  }
+  if (req.body.binanceApiSecret !== undefined && isBinanceApiSecretFromEnv()) {
+    return res.status(400).json({ error: 'Binance API secret đang lấy từ biến môi trường BINANCE_API_SECRET, không thể chỉnh từ web' });
+  }
+  ['siteName','brandText','logoUrl','adUrl','themeColor','layoutMode','depositInfo','qrImage','apiBaseUrl','apiKey','apiProvider','legacyApiBaseUrl','legacyApiKey','codesimApiBaseUrl','codesimApiKey','otpTimeoutMinutes','sepayBankCode','sepayAccount','sepayAccountName','sepayEnabled','sepayWebhookApiKey','binanceEnabled','binanceApiKey','binanceApiSecret','binanceUsdtVndRate','binanceContentPrefix','binanceMinUsdt','binanceMaxUsdt','binancePayeeName','binanceExpiryMinutes','binanceQrImage'].forEach(k => { if (req.body[k] !== undefined) db.settings[k] = String(req.body[k]); });
+  saveDb();
+  res.json(safeSettingsForUser(db.settings, true));
+});
 app.get('/api/admin/sim-api/account', auth, adminOnly, async (req, res) => {
   try {
     const provider = String(req.query.provider || 'legacy');
@@ -691,6 +998,15 @@ async function start() {
   db = await loadDb();
   await migrate();
   app.listen(PORT, () => console.log(`Có All Dịch Vụ running at http://localhost:${PORT} - DB: ${stateCollection ? 'MongoDB' : 'JSON'} - Upload: ${useCloudinary ? 'Cloudinary' : 'local'}`));
+  if (!binanceWorkerStarted) {
+    binanceWorkerStarted = true;
+    binanceWorkerHandle = setInterval(() => {
+      processBinancePayments().catch(e => console.error('Binance tick error:', e && e.message));
+    }, 60 * 1000);
+    setTimeout(() => {
+      processBinancePayments().catch(e => console.error('Binance initial tick error:', e && e.message));
+    }, 5000);
+  }
 }
 start().catch(err => {
   console.error('Không khởi động được server:', err);
