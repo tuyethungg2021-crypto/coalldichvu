@@ -9,6 +9,7 @@ const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const { MongoClient } = require('mongodb');
 const { v2: cloudinary } = require('cloudinary');
+const { createHighlandReferralRouter } = require('./highland-referral-integration');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -51,6 +52,7 @@ function daysInactive(u) {
 
 const defaults = {
   users: [], services: [], rentals: [], deposits: [], notifications: [], dmxProducts: [], dmxOrders: [], sepayTransactions: [], binanceTransactions: [],
+  highlandReferralPurchases: [], highlandReferralRuns: [],
   settings: {
     siteName: 'Có All Dịch Vụ',
     brandText: 'Thuê sim nhanh - nhiều nhà mạng - quản lý dễ dàng',
@@ -75,14 +77,30 @@ const defaults = {
     binanceExpiryMinutes: '30',
     binanceQrImage: '',
     binanceLastPolledAt: 0,
-    binanceNextNoteId: 1
+    binanceNextNoteId: 1,
+    highlandReferralEnabled: '0',
+    highlandReferralPrice: '0',
+    highlandReferralRemoteBaseUrl: '',
+    highlandReferralRemoteApiKey: '',
+    highlandReferralCooldownSeconds: '2',
+    highlandReferralRunTimeoutMinutes: '40'
   }
 };
 let db = null;
 
 function normalizeDb(parsed) {
   parsed = parsed || {};
-  return { ...defaults, ...parsed, dmxProducts: parsed.dmxProducts || [], dmxOrders: parsed.dmxOrders || [], sepayTransactions: parsed.sepayTransactions || [], binanceTransactions: parsed.binanceTransactions || [], settings: { ...defaults.settings, ...(parsed.settings || {}) } };
+  return {
+    ...defaults,
+    ...parsed,
+    dmxProducts: parsed.dmxProducts || [],
+    dmxOrders: parsed.dmxOrders || [],
+    sepayTransactions: parsed.sepayTransactions || [],
+    binanceTransactions: parsed.binanceTransactions || [],
+    highlandReferralPurchases: parsed.highlandReferralPurchases || [],
+    highlandReferralRuns: parsed.highlandReferralRuns || [],
+    settings: { ...defaults.settings, ...(parsed.settings || {}) }
+  };
 }
 async function loadDb() {
   if (MONGODB_URI) {
@@ -172,6 +190,17 @@ function auth(req, res, next) {
   } catch { res.status(401).json({ error: 'Phiên đăng nhập hết hạn' }); }
 }
 function adminOnly(req, res, next) { if (req.user.role !== 'admin') return res.status(403).json({ error: 'Chỉ admin được dùng chức năng này' }); next(); }
+
+app.use(createHighlandReferralRouter({
+  getDb: () => db,
+  saveDb,
+  auth,
+  adminOnly,
+  uid,
+  now,
+  cleanUser
+}));
+
 function providerCfg(provider) {
   provider = String(provider || 'legacy').toLowerCase();
   if (provider === 'codesim') return {
@@ -278,11 +307,16 @@ async function processExpiredRentals() {
 }
 function safeSettingsForUser(settings, isAdmin) {
   const out = { ...settings };
-  if (!isAdmin) { delete out.apiKey; delete out.legacyApiKey; delete out.codesimApiKey; delete out.sepayWebhookApiKey; delete out.binanceApiKey; delete out.binanceApiSecret; }
+  if (!isAdmin) { delete out.apiKey; delete out.legacyApiKey; delete out.codesimApiKey; delete out.sepayWebhookApiKey; delete out.binanceApiKey; delete out.binanceApiSecret; delete out.highlandReferralRemoteApiKey; delete out.highlandReferralRemoteBaseUrl; }
   if (isAdmin && out.legacyApiKey) out.legacyApiKeyMasked = out.legacyApiKey.slice(0, 6) + '...' + out.legacyApiKey.slice(-4);
   if (isAdmin && out.codesimApiKey) out.codesimApiKeyMasked = out.codesimApiKey.slice(0, 6) + '...' + out.codesimApiKey.slice(-4);
   if (isAdmin && out.apiKey) out.apiKeyMasked = out.apiKey.slice(0, 6) + '...' + out.apiKey.slice(-4);
   if (isAdmin && out.sepayWebhookApiKey) out.sepayWebhookApiKeyMasked = out.sepayWebhookApiKey.slice(0, 6) + '...' + out.sepayWebhookApiKey.slice(-4);
+  if (isAdmin && out.highlandReferralRemoteApiKey) {
+    out.highlandReferralRemoteApiKeyMasked = out.highlandReferralRemoteApiKey.slice(0, 6) + '...' + out.highlandReferralRemoteApiKey.slice(-4);
+    out.highlandReferralRemoteApiKeyConfigured = true;
+  }
+  if (isAdmin) delete out.highlandReferralRemoteApiKey;
   if (isAdmin) {
     const effKey = (typeof getBinanceApiKey === 'function') ? getBinanceApiKey() : '';
     const effSecret = (typeof getBinanceApiSecret === 'function') ? getBinanceApiSecret() : '';

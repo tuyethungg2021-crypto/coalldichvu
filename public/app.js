@@ -12,6 +12,9 @@ let descPollBusy = false;
 let binancePollTimer = null;
 let binancePollBusy = false;
 let binanceCountdownTimer = null;
+let highlandPollTimer = null;
+let highlandPollBusy = false;
+let highlandSubmitBusy = false;
 
 const $ = s => document.querySelector(s);
 const app = $('#app');
@@ -66,8 +69,8 @@ function header(){
   return `<div class="top"><div class="wrap topin"><div class="brand">${settings.logoUrl?`<img class="logo" src="${esc(settings.logoUrl)}">`:`<div class="logo"></div>`}<div><h1>${esc(settings.siteName||'Có All Dịch Vụ')}</h1><p>${esc(settings.brandText||'')}</p></div></div><div class="userbar"><span class="pill">${esc(me.username)} ${me.role==='admin'?'• Admin':''}</span><span class="pill">Số dư: <b>${fmt(me.balance)}</b></span><button class="secondary" onclick="logout()">Đăng xuất</button></div></div></div>`;
 }
 function menu(){
-  const common = [['services','Dịch vụ'],['dmx','Dịch Vụ DMX'],['history','Lịch sử'],['deposit','Nạp tiền']];
-  const admin = [['admin_services','Dịch vụ admin'],['admin_dmx','Quản lý DMX'],['admin_api','API thuê sim'],['admin_history','Lịch sử admin'],['admin_deposit_info','Nạp tiền admin'],['admin_users','Quản lý người dùng'],['admin_web','Quản lý web'],['admin_approve','Duyệt nạp tiền']];
+  const common = [['services','Dịch vụ'],['dmx','Dịch Vụ DMX'],['highland_referral','Highlands Coffee'],['history','Lịch sử'],['deposit','Nạp tiền']];
+  const admin = [['admin_services','Dịch vụ admin'],['admin_dmx','Quản lý DMX'],['admin_highland_referral','Quản trị Highlands Coffee'],['admin_api','API thuê sim'],['admin_history','Lịch sử admin'],['admin_deposit_info','Nạp tiền admin'],['admin_users','Quản lý người dùng'],['admin_web','Quản lý web'],['admin_approve','Duyệt nạp tiền']];
   const items = me.role==='admin' ? common.concat(admin) : common;
   return `<div class="side">${items.map(i=>`<button class="tab ${tab===i[0]?'active':''}" onclick="setTab('${i[0]}')">${i[1]}${i[0]==='admin_approve'&&notifications.filter(n=>!n.read).length?` (${notifications.filter(n=>!n.read).length})`:''}</button>`).join('')}</div>`;
 }
@@ -76,12 +79,13 @@ async function loadPage(){
   if(me?.role==='admin') notifications = await api('/api/admin/notifications').catch(()=>[]);
   app.innerHTML = header()+`<div class="wrap grid">${menu()}<div class="main"></div></div>`;
   if(settings.adUrl) $('.main').insertAdjacentHTML('beforeend', `<img class="ad" src="${esc(settings.adUrl)}">`);
+  stopHighlandReferralPolling();
   await renderTab();
   startOtpAutoPolling();
   startLiveDescriptionPolling();
 }
 async function setTab(t){ tab=t; await loadPage(); }
-function logout(){ stopOtpAutoPolling(); stopLiveDescriptionPolling(); stopBinancePolling(); localStorage.removeItem('token'); token=''; me=null; renderAuth(); }
+function logout(){ stopOtpAutoPolling(); stopLiveDescriptionPolling(); stopBinancePolling(); stopHighlandReferralPolling(); localStorage.removeItem('token'); token=''; me=null; renderAuth(); }
 function renderAuth(){
   app.innerHTML = `<div class="wrap auth card"><h2>${esc(settings.siteName||'Có All Dịch Vụ')}</h2><div id="msg"></div><div class="field"><label>Tài khoản</label><input id="username" placeholder="Nhập tài khoản"></div><div class="field"><label>Mật khẩu</label><input id="password" type="password" placeholder="Nhập mật khẩu"></div><div class="flex"><button onclick="login()">Đăng nhập</button><button class="secondary" onclick="register()">Đăng ký user</button></div></div>`;
 }
@@ -90,10 +94,12 @@ async function register(){ try{ const d=await api('/api/register',{method:'POST'
 async function renderTab(){
   if(tab==='services') return userServices();
   if(tab==='dmx') return userDmx();
+  if(tab==='highland_referral') return userHighlandReferral();
   if(tab==='history') return userHistory();
   if(tab==='deposit') return userDeposit();
   if(tab==='admin_services') return adminServices();
   if(tab==='admin_dmx') return adminDmx();
+  if(tab==='admin_highland_referral') return adminHighlandReferral();
   if(tab==='admin_api') return adminApi();
   if(tab==='admin_history') return adminHistory();
   if(tab==='admin_deposit_info') return adminDepositInfo();
@@ -222,6 +228,147 @@ async function saveDmxProduct(id){ let imageUrl=$('#dmximg_'+id)?.value||''; if(
 async function deleteDmxProduct(id){ if(!confirm('Xóa sản phẩm DMX này?')) return; await api('/api/admin/dmx/products/'+id,{method:'DELETE'}); toast('Đã xóa sản phẩm'); dmxProducts=await api('/api/dmx/products'); renderAdminDmxTable(); }
 async function adminDmxOrders(){ const d=await api('/api/admin/dmx/orders'); const rows=d.rows||[]; $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Admin - Đơn hàng DMX</h2><div class="stats"><span class="pill">Tổng đơn: <b>${d.stats?.totalOrders||0}</b></span><span class="pill">Doanh thu: <b>${fmt(d.stats?.revenue||0)}</b></span></div><div class="row"><div class="field"><label>Tìm đơn theo user/sản phẩm</label><input id="dmxOrderSearch" oninput="renderAdminDmxOrders()" placeholder="username, sản phẩm, phân loại"></div><div class="field"><label>Lọc theo ngày</label><input id="dmxOrderDate" type="date" onchange="renderAdminDmxOrders()"></div></div><div id="dmxOrderTable"></div></div>`); window._adminDmxOrders=rows; renderAdminDmxOrders(); }
 function renderAdminDmxOrders(){ const rows=window._adminDmxOrders||[]; const q=($('#dmxOrderSearch')?.value||'').toLowerCase().trim(); const day=$('#dmxOrderDate')?.value||''; const filtered=rows.filter(o=>(!q||[o.username,o.product_name,o.category].join(' ').toLowerCase().includes(q))&&(!day||String(o.created_at||'').slice(0,10)===day)); $('#dmxOrderTable').innerHTML=tableDmxOrders(filtered,true); }
+
+function stopHighlandReferralPolling(){ if(highlandPollTimer){ clearInterval(highlandPollTimer); highlandPollTimer=null; } highlandPollBusy=false; }
+function highlandIsDoneStatus(s){ return ['done','failed','timeout','cancelled'].includes(String(s||'')); }
+function highlandStatusText(s){
+  const map={creating_remote_job:'Đang tạo lượt',queued:'Đang chờ',running:'Đang chạy',done:'Hoàn tất',failed:'Thất bại',timeout:'Quá hạn',cancelled:'Đã hủy'};
+  return map[String(s||'')] || String(s||'');
+}
+function highlandMessageText(msg){
+  const map={done:'Hoàn tất','Remote job đã được tạo':'Đã tạo lượt xử lý từ xa','Đang tạo remote job':'Đang tạo lượt xử lý từ xa','Remote job không hoàn thành':'Lượt xử lý từ xa không hoàn thành'};
+  return map[String(msg||'')] || String(msg||'');
+}
+function highlandStatusBadge(s){ const v=String(s||''); const cls=v==='done'?'status-ok':(['failed','timeout','cancelled'].includes(v)?'status-no':'status-wait'); return `<span class="badge ${cls}">${esc(highlandStatusText(v))}</span>`; }
+function highlandProgressText(r){ return Number(r.successCount||0) >= 5 || r.status === 'done' ? 'Thành công' : 'Đang xử lý'; }
+function highlandReferralCodeCache(){
+  try{ return JSON.parse(localStorage.getItem('highlandReferralCodes')||'{}')||{}; }catch{ return {}; }
+}
+function saveHighlandReferralCode(runId, referralCode){
+  if(!runId||!referralCode) return;
+  const cache=highlandReferralCodeCache();
+  cache[String(runId)]=String(referralCode);
+  localStorage.setItem('highlandReferralCodes', JSON.stringify(cache));
+}
+function visibleHighlandReferralCode(r){
+  return String(r.referralCode||highlandReferralCodeCache()[String(r.id||'')]||'');
+}
+function tableHighlandRuns(rows){ if(!rows||!rows.length) return '<p class="muted">Chưa có lịch sử Highlands Coffee.</p>'; return `<div class="tablewrap"><table class="table"><tr><th>Mã giới thiệu</th><th>Trạng thái</th><th>Tiến độ</th><th>Thời gian</th></tr>${rows.map(r=>`<tr><td><code>${esc(visibleHighlandReferralCode(r))}</code></td><td>${highlandStatusBadge(r.status)}</td><td>${esc(highlandProgressText(r))}</td><td>${date(r.created_at)}</td></tr>`).join('')}</table></div>`; }
+async function userHighlandReferral(){
+  const d=await api('/api/highland-referral/status');
+  const s=d.settings||{};
+  me=d.user||me;
+  const active=d.activeRun;
+  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Highlands Coffee</h2><div id="highlandStatusBox">${renderHighlandUserBox(d)}</div></div><div class="card"><h2>Lịch sử Highlands Coffee</h2><div id="highlandRunHistory">${tableHighlandRuns(d.runs||[])}</div></div>`);
+  if(s.enabled && active && !highlandIsDoneStatus(active.status)) startHighlandReferralPolling(active.id);
+}
+function renderHighlandUserBox(d){
+  const s=d.settings||{};
+  const active=d.activeRun;
+  if(!s.enabled) return '<p class="notice err">Dịch vụ Highlands Coffee đang tắt.</p>';
+  const running = active && !highlandIsDoneStatus(active.status);
+  const runBox = running ? `<div class="notice okbox"><b>Đang xử lý:</b> ${highlandStatusBadge(active.status)} - ${esc(highlandProgressText(active))}<br><small>${esc(highlandMessageText(active.safeMessage||active.safeError||''))}</small></div>` : '';
+  return `<div class="stats"><span class="pill">Giá: <b>${fmt(s.price)}</b>/lượt</span><span class="pill">Lượt còn: <b>${Number(d.credits||0)}</b></span><span class="pill">Số dư: <b>${fmt(me?.balance||0)}</b></span></div>${runBox}<div class="field"><label>Mã giới thiệu Highlands Coffee</label><input id="highlandReferralCode" placeholder="Nhập mã giới thiệu" ${running?'disabled':''}></div><button id="highlandSubmitBtn" ${running?'disabled':''} onclick="submitHighlandReferral()">Đăng Ký</button>`;
+}
+async function refreshHighlandReferralBox(){
+  const d=await api('/api/highland-referral/status');
+  me=d.user||me;
+  if($('#highlandStatusBox')) $('#highlandStatusBox').innerHTML=renderHighlandUserBox(d);
+  if($('#highlandRunHistory')) $('#highlandRunHistory').innerHTML=tableHighlandRuns(d.runs||[]);
+  if(d.activeRun && !highlandIsDoneStatus(d.activeRun.status)) startHighlandReferralPolling(d.activeRun.id);
+}
+async function submitHighlandReferral(){
+  if(highlandSubmitBusy) return;
+  const referralCode=String($('#highlandReferralCode')?.value||'').trim();
+  if(!/^[A-Za-z0-9_-]{4,64}$/.test(referralCode)){ toast('Mã giới thiệu không hợp lệ', false); return; }
+  const btn=$('#highlandSubmitBtn');
+  highlandSubmitBusy=true;
+  if(btn){ btn.disabled=true; btn.textContent='Đang xử lý...'; }
+  try{
+    const status=await api('/api/highland-referral/status');
+    if(Number(status.credits||0)<=0){
+      const purchased=await api('/api/highland-referral/purchase',{method:'POST',body:JSON.stringify({quantity:1})});
+      me=purchased.user||me;
+      toast('Đã mua 1 lượt Highlands Coffee');
+    }
+    await runHighlandReferral(referralCode);
+  }catch(e){
+    toast(e.message,false);
+    highlandSubmitBusy=false;
+    if(btn){ btn.disabled=false; btn.textContent='Đăng Ký'; }
+  }
+}
+async function runHighlandReferral(referralCodeInput){
+  const referralCode=String(referralCodeInput!==undefined ? referralCodeInput : ($('#highlandReferralCode')?.value||'')).trim();
+  if(!/^[A-Za-z0-9_-]{4,64}$/.test(referralCode)){ toast('Mã giới thiệu không hợp lệ', false); return; }
+  try{
+    const d=await api('/api/highland-referral/run',{method:'POST',body:JSON.stringify({referralCode})});
+    me=d.user||me;
+    saveHighlandReferralCode(d.run?.id, referralCode);
+    if(d.run) d.run.referralCode=referralCode;
+    if(['failed','timeout','cancelled'].includes(String(d.run?.status||''))){
+      toast(d.run.safeError || 'Không tạo được lượt xử lý Highlands Coffee', false);
+      highlandSubmitBusy=false;
+      await refreshHighlandReferralBox();
+      return;
+    }
+    toast('Đã tạo lượt xử lý Highlands Coffee');
+    await refreshHighlandReferralBox();
+    startHighlandReferralPolling(d.run.id);
+  }catch(e){ const btn=$('#highlandSubmitBtn'); highlandSubmitBusy=false; if(btn){ btn.disabled=false; btn.textContent='Đăng Ký'; } toast(e.message,false); }
+}
+function startHighlandReferralPolling(runId){
+  stopHighlandReferralPolling();
+  if(!runId) return;
+  highlandPollTimer=setInterval(()=>pollHighlandRunOnce(runId),6000);
+  setTimeout(()=>pollHighlandRunOnce(runId),1000);
+}
+async function pollHighlandRunOnce(runId){
+  if(highlandPollBusy||!runId) return;
+  highlandPollBusy=true;
+  try{
+    const d=await api('/api/highland-referral/runs/'+encodeURIComponent(runId));
+    me=d.user||me;
+    const r=d.run||{};
+    if(highlandIsDoneStatus(r.status)){
+      stopHighlandReferralPolling();
+      highlandSubmitBusy=false;
+      if(r.status==='done') toast('Hoàn tất');
+      await refreshHighlandReferralBox();
+      await loadMe();
+    }
+  }catch(e){
+    toast(e.message,false);
+  }finally{ highlandPollBusy=false; }
+}
+async function adminHighlandReferral(){
+  const d=await api('/api/admin/highland-referral/settings');
+  const s=d.settings||{};
+  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Quản trị Highlands Coffee</h2><div class="row3"><div class="field"><label>Bật dịch vụ</label><select id="hrEnabled"><option value="0">Tắt</option><option value="1" ${s.enabled?'selected':''}>Bật</option></select></div><div class="field"><label>Giá / lượt</label><input id="hrPrice" type="number" min="0" value="${esc(s.price||0)}"></div><div class="field"><label>Thời gian chờ giữa 2 lượt (giây)</label><input id="hrCooldown" type="number" min="0" max="86400" value="${esc(s.cooldownSeconds||2)}"></div></div><div class="row"><div class="field"><label>Thời gian quá hạn xử lý (phút)</label><input id="hrTimeout" type="number" min="1" max="240" value="${esc(s.timeoutMinutes||40)}"></div><div class="field"><label>Địa chỉ API từ xa</label><input id="hrRemoteUrl" value="${esc(s.remoteBaseUrl||'')}" placeholder="https://dia-chi-dich-vu-cua-ban.example"></div></div><div class="field"><label>Khóa API từ xa mới</label><input id="hrRemoteKey" type="password" placeholder="${esc(s.remoteApiKeyMasked||'Để trống nếu không đổi')}"></div><p class="muted">Khóa API hiện tại: ${esc(s.remoteApiKeyMasked||'Chưa cài')}</p><div class="flex"><button onclick="saveHighlandAdminSettings()">Lưu cấu hình</button><button class="secondary" onclick="testHighlandRemote()">Kiểm tra kết nối</button><button class="secondary" onclick="loadAdminHighlandRuns()">Tải lịch sử</button></div><div id="hrAdminResult" class="notice" style="white-space:pre-wrap;margin-top:12px"></div></div><div class="card"><h2>Lịch sử Highlands Coffee</h2><div id="hrAdminRuns"><p class="muted">Bấm tải lịch sử để xem.</p></div></div>`);
+}
+async function saveHighlandAdminSettings(){
+  const payload={
+    highlandReferralEnabled: $('#hrEnabled').value,
+    highlandReferralPrice: $('#hrPrice').value,
+    highlandReferralCooldownSeconds: $('#hrCooldown').value,
+    highlandReferralRunTimeoutMinutes: $('#hrTimeout').value,
+    highlandReferralRemoteBaseUrl: $('#hrRemoteUrl').value
+  };
+  if($('#hrRemoteKey').value) payload.highlandReferralRemoteApiKey=$('#hrRemoteKey').value;
+  try{ await api('/api/admin/highland-referral/settings',{method:'PATCH',body:JSON.stringify(payload)}); toast('Đã lưu cấu hình Highlands Coffee'); await loadSettings(); await loadPage(); }catch(e){ toast(e.message,false); }
+}
+async function testHighlandRemote(){
+  const box=$('#hrAdminResult'); if(box) box.textContent='Đang kiểm tra...';
+  try{
+    const d=await api('/api/admin/highland-referral/health');
+    if(box) box.textContent=d.ok ? `Kết nối thành công\nMã phản hồi: ${d.status}\nSẵn sàng: ${d.data?.ready?'Có':'Không'}\nCơ sở dữ liệu: ${d.data?.db||'Không rõ'}\nPhiên bản: ${d.data?.version||'Không rõ'}` : `Kết nối lỗi\nMã phản hồi: ${d.status||'Không rõ'}\n${d.error||''}`;
+    toast(d.ok?'Kết nối API từ xa thành công':'API từ xa bị lỗi',!!d.ok);
+  }catch(e){ if(box) box.textContent=e.message; toast(e.message,false); }
+}
+async function loadAdminHighlandRuns(){
+  const box=$('#hrAdminRuns'); if(box) box.innerHTML='<p class="muted">Đang tải...</p>';
+  try{ const rows=await api('/api/admin/highland-referral/runs'); if(box) box.innerHTML=tableHighlandRuns(rows||[]); }catch(e){ if(box) box.innerHTML='<p class="notice err">'+esc(e.message)+'</p>'; }
+}
 
 async function userDeposit(){
   stopBinancePolling();
