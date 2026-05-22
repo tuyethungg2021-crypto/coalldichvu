@@ -235,12 +235,19 @@ function highlandStatusText(s){
   const map={creating_remote_job:'Đang tạo lượt',queued:'Đang chờ',running:'Đang chạy',done:'Hoàn tất',failed:'Thất bại',timeout:'Quá hạn',cancelled:'Đã hủy'};
   return map[String(s||'')] || String(s||'');
 }
+function highlandEffectiveStatus(r){
+  const status=String(r?.status||'');
+  const remoteStatus=String(r?.remoteStatus||'');
+  const target=Math.max(1,Number(r?.targetSuccessCount||1));
+  if(status==='done'||remoteStatus==='done'||Number(r?.successCount||0)>=target) return 'done';
+  return status;
+}
 function highlandMessageText(msg){
   const map={done:'Hoàn tất','Remote job đã được tạo':'Đã tạo lượt xử lý từ xa','Đang tạo remote job':'Đang tạo lượt xử lý từ xa','Remote job không hoàn thành':'Lượt xử lý từ xa không hoàn thành'};
   return map[String(msg||'')] || String(msg||'');
 }
-function highlandStatusBadge(s){ const v=String(s||''); const cls=v==='done'?'status-ok':(['failed','timeout','cancelled'].includes(v)?'status-no':'status-wait'); return `<span class="badge ${cls}">${esc(highlandStatusText(v))}</span>`; }
-function highlandProgressText(r){ const status=String(r.status||''); const target=Math.max(1,Number(r.targetSuccessCount||1)); return status==='done' || (!['failed','timeout','cancelled'].includes(status) && Number(r.successCount||0) >= target) ? 'Thành công' : 'Đang xử lý'; }
+function highlandStatusBadge(r){ const v=typeof r==='string'?String(r||''):highlandEffectiveStatus(r); const cls=v==='done'?'status-ok':(['failed','timeout','cancelled'].includes(v)?'status-no':'status-wait'); return `<span class="badge ${cls}">${esc(highlandStatusText(v))}</span>`; }
+function highlandProgressText(r){ return highlandEffectiveStatus(r)==='done' ? 'Thành công' : 'Đang xử lý'; }
 function highlandReferralCodeCache(){
   try{ return JSON.parse(localStorage.getItem('highlandReferralCodes')||'{}')||{}; }catch{ return {}; }
 }
@@ -253,8 +260,8 @@ function saveHighlandReferralCode(runId, referralCode){
 function visibleHighlandReferralCode(r){
   return String(r.referralCode||highlandReferralCodeCache()[String(r.id||'')]||'');
 }
-function canRetryHighlandRun(r){ const s=String(r.status||''); return s && s!=='done' && highlandIsDoneStatus(s); }
-function tableHighlandRuns(rows, showActions=true){ if(!rows||!rows.length) return '<p class="muted">Chưa có lịch sử Highlands Coffee.</p>'; return `<div class="tablewrap"><table class="table"><tr><th>Mã giới thiệu</th><th>Trạng thái</th><th>Tiến độ</th><th>Thời gian</th>${showActions?'<th>Thao tác</th>':''}</tr>${rows.map(r=>{ const code=visibleHighlandReferralCode(r); return `<tr><td><code>${esc(code)}</code></td><td>${highlandStatusBadge(r.status)}</td><td>${esc(highlandProgressText(r))}</td><td>${date(r.created_at)}</td>${showActions?`<td>${canRetryHighlandRun(r)?`<button class="small secondary" onclick="retryHighlandReferral('${esc(code)}')">Yêu cầu lại</button>`:''}</td>`:''}</tr>`; }).join('')}</table></div>`; }
+function canRetryHighlandRun(r){ const s=highlandEffectiveStatus(r); return s && s!=='done' && highlandIsDoneStatus(s); }
+function tableHighlandRuns(rows, showActions=true){ if(!rows||!rows.length) return '<p class="muted">Chưa có lịch sử Highlands Coffee.</p>'; return `<div class="tablewrap"><table class="table"><tr><th>Mã giới thiệu</th><th>Trạng thái</th><th>Tiến độ</th><th>Thời gian</th>${showActions?'<th>Thao tác</th>':''}</tr>${rows.map(r=>{ const code=visibleHighlandReferralCode(r); return `<tr><td><code>${esc(code)}</code></td><td>${highlandStatusBadge(r)}</td><td>${esc(highlandProgressText(r))}</td><td>${date(r.created_at)}</td>${showActions?`<td>${canRetryHighlandRun(r)?`<button class="small secondary" onclick="retryHighlandReferral('${esc(code)}')">Yêu cầu lại</button>`:''}</td>`:''}</tr>`; }).join('')}</table></div>`; }
 function highlandActiveRuns(d){ return Array.isArray(d.activeRuns) ? d.activeRuns : (d.activeRun ? [d.activeRun] : []); }
 async function userHighlandReferral(){
   const d=await api('/api/highland-referral/status');
@@ -270,7 +277,7 @@ function renderHighlandUserBox(d){
   if(!s.enabled) return '<p class="notice err">Dịch vụ Highlands Coffee đang tắt.</p>';
   const maxActive=Number(d.maxActiveRuns||5);
   const queueFull=activeRuns.length>=maxActive;
-  const runBox = activeRuns.length ? `<div class="notice okbox"><b>Hàng chờ:</b> ${activeRuns.length}/${maxActive} lượt<br>${activeRuns.map(r=>`${highlandStatusBadge(r.status)} <code>${esc(visibleHighlandReferralCode(r))}</code> - ${esc(highlandProgressText(r))}`).join('<br>')}</div>` : '';
+  const runBox = activeRuns.length ? `<div class="notice okbox"><b>Hàng chờ:</b> ${activeRuns.length}/${maxActive} lượt<br>${activeRuns.map(r=>`${highlandStatusBadge(r)} <code>${esc(visibleHighlandReferralCode(r))}</code> - ${esc(highlandProgressText(r))}`).join('<br>')}</div>` : '';
   return `<div class="stats"><span class="pill">Giá: <b>${fmt(s.price)}</b>/lượt</span><span class="pill">Lượt còn: <b>${Number(d.credits||0)}</b></span><span class="pill">Hàng chờ: <b>${activeRuns.length}/${maxActive}</b></span><span class="pill">Số dư: <b>${fmt(me?.balance||0)}</b></span></div>${runBox}<div class="field"><label>Mã giới thiệu Highlands Coffee</label><input id="highlandReferralCode" placeholder="Nhập mã giới thiệu" ${queueFull?'disabled':''}></div><button id="highlandSubmitBtn" ${queueFull?'disabled':''} onclick="submitHighlandReferral()">${queueFull?'Hàng chờ đã đầy':'Thêm vào hàng chờ'}</button>`;
 }
 async function refreshHighlandReferralBox(){

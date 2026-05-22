@@ -1,6 +1,7 @@
 const express = require('express');
 
 const ACTIVE_RUN_STATUSES = new Set(['creating_remote_job', 'queued', 'running']);
+const REMOTE_SYNCABLE_LOCAL_STATUSES = new Set([...ACTIVE_RUN_STATUSES, 'timeout']);
 const TERMINAL_REMOTE_STATUSES = new Set(['done', 'failed', 'timeout', 'cancelled']);
 const REFERRAL_CODE_RE = /^[A-Za-z0-9_-]{4,64}$/;
 const HIGHLAND_TARGET_SUCCESS_COUNT = 1;
@@ -143,6 +144,18 @@ function createHighlandReferralRouter(deps) {
       .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
   }
 
+  function shouldSyncRemoteRun(run) {
+    return !!(run && run.remoteJobId && REMOTE_SYNCABLE_LOCAL_STATUSES.has(String(run.status || '')));
+  }
+
+  function syncableRunsForUser(userId, limit = 20) {
+    ensureHighlandState();
+    return db().highlandReferralRuns
+      .filter(r => r.user_id === userId && shouldSyncRemoteRun(r))
+      .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+      .slice(0, limit);
+  }
+
   function latestFinishedRun(userId) {
     ensureHighlandState();
     return db().highlandReferralRuns
@@ -253,9 +266,9 @@ function createHighlandReferralRouter(deps) {
   }
 
   async function syncRemoteRun(run) {
-    if (!run || !run.remoteJobId || !ACTIVE_RUN_STATUSES.has(String(run.status || ''))) return run;
+    if (!shouldSyncRemoteRun(run)) return run;
     if (cleanupStaleRuns()) await persist();
-    if (!ACTIVE_RUN_STATUSES.has(String(run.status || ''))) return run;
+    if (!shouldSyncRemoteRun(run)) return run;
 
     let remote;
     try {
@@ -277,6 +290,8 @@ function createHighlandReferralRouter(deps) {
     if (remoteStatus === 'done') {
       finalizeReservedCredit(run);
       markRunTerminal(run, 'done', '');
+      run.remoteStatus = 'done';
+      run.safeError = '';
       run.result = remote.result || null;
     } else if (TERMINAL_REMOTE_STATUSES.has(remoteStatus)) {
       releaseReservedCredit(run, 'Đã hoàn lại lượt vì lượt xử lý từ xa không hoàn thành');
@@ -293,7 +308,7 @@ function createHighlandReferralRouter(deps) {
     try {
       ensureHighlandState();
       if (cleanupStaleRuns()) await persist();
-      for (const run of activeRunsForUser(req.user.id)) {
+      for (const run of syncableRunsForUser(req.user.id)) {
         await syncRemoteRun(run);
       }
       const activeRuns = activeRunsForUser(req.user.id);
