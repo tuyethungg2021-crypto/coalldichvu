@@ -253,29 +253,32 @@ function saveHighlandReferralCode(runId, referralCode){
 function visibleHighlandReferralCode(r){
   return String(r.referralCode||highlandReferralCodeCache()[String(r.id||'')]||'');
 }
-function tableHighlandRuns(rows){ if(!rows||!rows.length) return '<p class="muted">Chưa có lịch sử Highlands Coffee.</p>'; return `<div class="tablewrap"><table class="table"><tr><th>Mã giới thiệu</th><th>Trạng thái</th><th>Tiến độ</th><th>Thời gian</th></tr>${rows.map(r=>`<tr><td><code>${esc(visibleHighlandReferralCode(r))}</code></td><td>${highlandStatusBadge(r.status)}</td><td>${esc(highlandProgressText(r))}</td><td>${date(r.created_at)}</td></tr>`).join('')}</table></div>`; }
+function canRetryHighlandRun(r){ const s=String(r.status||''); return s && s!=='done' && highlandIsDoneStatus(s); }
+function tableHighlandRuns(rows, showActions=true){ if(!rows||!rows.length) return '<p class="muted">Chưa có lịch sử Highlands Coffee.</p>'; return `<div class="tablewrap"><table class="table"><tr><th>Mã giới thiệu</th><th>Trạng thái</th><th>Tiến độ</th><th>Thời gian</th>${showActions?'<th>Thao tác</th>':''}</tr>${rows.map(r=>{ const code=visibleHighlandReferralCode(r); return `<tr><td><code>${esc(code)}</code></td><td>${highlandStatusBadge(r.status)}</td><td>${esc(highlandProgressText(r))}</td><td>${date(r.created_at)}</td>${showActions?`<td>${canRetryHighlandRun(r)?`<button class="small secondary" onclick="retryHighlandReferral('${esc(code)}')">Yêu cầu lại</button>`:''}</td>`:''}</tr>`; }).join('')}</table></div>`; }
+function highlandActiveRuns(d){ return Array.isArray(d.activeRuns) ? d.activeRuns : (d.activeRun ? [d.activeRun] : []); }
 async function userHighlandReferral(){
   const d=await api('/api/highland-referral/status');
   const s=d.settings||{};
   me=d.user||me;
-  const active=d.activeRun;
+  const activeRuns=highlandActiveRuns(d);
   $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Highlands Coffee</h2><div id="highlandStatusBox">${renderHighlandUserBox(d)}</div></div><div class="card"><h2>Lịch sử Highlands Coffee</h2><div id="highlandRunHistory">${tableHighlandRuns(d.runs||[])}</div></div>`);
-  if(s.enabled && active && !highlandIsDoneStatus(active.status)) startHighlandReferralPolling(active.id);
+  if(s.enabled && activeRuns.length) startHighlandReferralPolling();
 }
 function renderHighlandUserBox(d){
   const s=d.settings||{};
-  const active=d.activeRun;
+  const activeRuns=highlandActiveRuns(d);
   if(!s.enabled) return '<p class="notice err">Dịch vụ Highlands Coffee đang tắt.</p>';
-  const running = active && !highlandIsDoneStatus(active.status);
-  const runBox = running ? `<div class="notice okbox"><b>Đang xử lý:</b> ${highlandStatusBadge(active.status)} - ${esc(highlandProgressText(active))}<br><small>${esc(highlandMessageText(active.safeMessage||active.safeError||''))}</small></div>` : '';
-  return `<div class="stats"><span class="pill">Giá: <b>${fmt(s.price)}</b>/lượt</span><span class="pill">Lượt còn: <b>${Number(d.credits||0)}</b></span><span class="pill">Số dư: <b>${fmt(me?.balance||0)}</b></span></div>${runBox}<div class="field"><label>Mã giới thiệu Highlands Coffee</label><input id="highlandReferralCode" placeholder="Nhập mã giới thiệu" ${running?'disabled':''}></div><button id="highlandSubmitBtn" ${running?'disabled':''} onclick="submitHighlandReferral()">Đăng Ký</button>`;
+  const maxActive=Number(d.maxActiveRuns||5);
+  const queueFull=activeRuns.length>=maxActive;
+  const runBox = activeRuns.length ? `<div class="notice okbox"><b>Hàng chờ:</b> ${activeRuns.length}/${maxActive} lượt<br>${activeRuns.map(r=>`${highlandStatusBadge(r.status)} <code>${esc(visibleHighlandReferralCode(r))}</code> - ${esc(highlandProgressText(r))}`).join('<br>')}</div>` : '';
+  return `<div class="stats"><span class="pill">Giá: <b>${fmt(s.price)}</b>/lượt</span><span class="pill">Lượt còn: <b>${Number(d.credits||0)}</b></span><span class="pill">Hàng chờ: <b>${activeRuns.length}/${maxActive}</b></span><span class="pill">Số dư: <b>${fmt(me?.balance||0)}</b></span></div>${runBox}<div class="field"><label>Mã giới thiệu Highlands Coffee</label><input id="highlandReferralCode" placeholder="Nhập mã giới thiệu" ${queueFull?'disabled':''}></div><button id="highlandSubmitBtn" ${queueFull?'disabled':''} onclick="submitHighlandReferral()">${queueFull?'Hàng chờ đã đầy':'Thêm vào hàng chờ'}</button>`;
 }
 async function refreshHighlandReferralBox(){
   const d=await api('/api/highland-referral/status');
   me=d.user||me;
   if($('#highlandStatusBox')) $('#highlandStatusBox').innerHTML=renderHighlandUserBox(d);
   if($('#highlandRunHistory')) $('#highlandRunHistory').innerHTML=tableHighlandRuns(d.runs||[]);
-  if(d.activeRun && !highlandIsDoneStatus(d.activeRun.status)) startHighlandReferralPolling(d.activeRun.id);
+  if(highlandActiveRuns(d).length) startHighlandReferralPolling(); else stopHighlandReferralPolling();
 }
 async function submitHighlandReferral(){
   if(highlandSubmitBusy) return;
@@ -285,18 +288,32 @@ async function submitHighlandReferral(){
   highlandSubmitBusy=true;
   if(btn){ btn.disabled=true; btn.textContent='Đang xử lý...'; }
   try{
-    const status=await api('/api/highland-referral/status');
-    if(Number(status.credits||0)<=0){
-      const purchased=await api('/api/highland-referral/purchase',{method:'POST',body:JSON.stringify({quantity:1})});
-      me=purchased.user||me;
-      toast('Đã mua 1 lượt Highlands Coffee');
-    }
-    await runHighlandReferral(referralCode);
+    await queueHighlandReferral(referralCode);
   }catch(e){
     toast(e.message,false);
     highlandSubmitBusy=false;
-    if(btn){ btn.disabled=false; btn.textContent='Đăng Ký'; }
+    if(btn){ btn.disabled=false; btn.textContent='Thêm vào hàng chờ'; }
   }
+}
+async function queueHighlandReferral(referralCode){
+  const status=await api('/api/highland-referral/status');
+  const activeRuns=highlandActiveRuns(status);
+  const maxActive=Number(status.maxActiveRuns||5);
+  if(activeRuns.length>=maxActive) throw new Error(`Bạn chỉ được có tối đa ${maxActive} lượt Highlands Coffee đang chờ/chạy`);
+  if(Number(status.credits||0)<=0){
+    const purchased=await api('/api/highland-referral/purchase',{method:'POST',body:JSON.stringify({quantity:1})});
+    me=purchased.user||me;
+    toast('Đã mua 1 lượt Highlands Coffee');
+  }
+  await runHighlandReferral(referralCode);
+}
+async function retryHighlandReferral(referralCode){
+  if(highlandSubmitBusy) return;
+  referralCode=String(referralCode||'').trim();
+  if(!/^[A-Za-z0-9_-]{4,64}$/.test(referralCode)){ toast('Mã giới thiệu không hợp lệ', false); return; }
+  highlandSubmitBusy=true;
+  try{ await queueHighlandReferral(referralCode); }
+  catch(e){ toast(e.message,false); highlandSubmitBusy=false; await refreshHighlandReferralBox(); }
 }
 async function runHighlandReferral(referralCodeInput){
   const referralCode=String(referralCodeInput!==undefined ? referralCodeInput : ($('#highlandReferralCode')?.value||'')).trim();
@@ -312,29 +329,28 @@ async function runHighlandReferral(referralCodeInput){
       await refreshHighlandReferralBox();
       return;
     }
-    toast('Đã tạo lượt xử lý Highlands Coffee');
+    toast('Đã thêm vào hàng chờ Highlands Coffee');
+    highlandSubmitBusy=false;
     await refreshHighlandReferralBox();
     startHighlandReferralPolling(d.run.id);
-  }catch(e){ const btn=$('#highlandSubmitBtn'); highlandSubmitBusy=false; if(btn){ btn.disabled=false; btn.textContent='Đăng Ký'; } toast(e.message,false); }
+  }catch(e){ const btn=$('#highlandSubmitBtn'); highlandSubmitBusy=false; if(btn){ btn.disabled=false; btn.textContent='Thêm vào hàng chờ'; } toast(e.message,false); }
 }
 function startHighlandReferralPolling(runId){
-  stopHighlandReferralPolling();
-  if(!runId) return;
-  highlandPollTimer=setInterval(()=>pollHighlandRunOnce(runId),6000);
-  setTimeout(()=>pollHighlandRunOnce(runId),1000);
+  if(highlandPollTimer) return;
+  highlandPollTimer=setInterval(()=>pollHighlandRunOnce(),6000);
+  setTimeout(()=>pollHighlandRunOnce(),1000);
 }
 async function pollHighlandRunOnce(runId){
-  if(highlandPollBusy||!runId) return;
+  if(highlandPollBusy) return;
   highlandPollBusy=true;
   try{
-    const d=await api('/api/highland-referral/runs/'+encodeURIComponent(runId));
+    const d=await api('/api/highland-referral/status');
     me=d.user||me;
-    const r=d.run||{};
-    if(highlandIsDoneStatus(r.status)){
+    if($('#highlandStatusBox')) $('#highlandStatusBox').innerHTML=renderHighlandUserBox(d);
+    if($('#highlandRunHistory')) $('#highlandRunHistory').innerHTML=tableHighlandRuns(d.runs||[]);
+    if(!highlandActiveRuns(d).length){
       stopHighlandReferralPolling();
       highlandSubmitBusy=false;
-      if(r.status==='done') toast('Hoàn tất');
-      await refreshHighlandReferralBox();
       await loadMe();
     }
   }catch(e){
@@ -367,7 +383,7 @@ async function testHighlandRemote(){
 }
 async function loadAdminHighlandRuns(){
   const box=$('#hrAdminRuns'); if(box) box.innerHTML='<p class="muted">Đang tải...</p>';
-  try{ const rows=await api('/api/admin/highland-referral/runs'); if(box) box.innerHTML=tableHighlandRuns(rows||[]); }catch(e){ if(box) box.innerHTML='<p class="notice err">'+esc(e.message)+'</p>'; }
+  try{ const rows=await api('/api/admin/highland-referral/runs'); if(box) box.innerHTML=tableHighlandRuns(rows||[], false); }catch(e){ if(box) box.innerHTML='<p class="notice err">'+esc(e.message)+'</p>'; }
 }
 
 async function userDeposit(){

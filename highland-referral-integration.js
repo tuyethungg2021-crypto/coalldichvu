@@ -4,6 +4,7 @@ const ACTIVE_RUN_STATUSES = new Set(['creating_remote_job', 'queued', 'running']
 const TERMINAL_REMOTE_STATUSES = new Set(['done', 'failed', 'timeout', 'cancelled']);
 const REFERRAL_CODE_RE = /^[A-Za-z0-9_-]{4,64}$/;
 const HIGHLAND_TARGET_SUCCESS_COUNT = 1;
+const HIGHLAND_MAX_ACTIVE_RUNS_PER_USER = 5;
 
 function createHighlandReferralRouter(deps) {
   const {
@@ -51,11 +52,18 @@ function createHighlandReferralRouter(deps) {
     return {
       enabled: String(settings.highlandReferralEnabled || '0') === '1',
       price: Number.isFinite(priceRaw) ? Math.max(0, priceRaw) : 0,
-      remoteBaseUrl: String(settings.highlandReferralRemoteBaseUrl || '').trim().replace(/\/+$/, ''),
+      remoteBaseUrl: normalizeRemoteBaseUrl(settings.highlandReferralRemoteBaseUrl),
       remoteApiKey: String(settings.highlandReferralRemoteApiKey || '').trim(),
       cooldownSeconds: Number.isFinite(cooldownRaw) ? Math.max(0, Math.min(86400, cooldownRaw)) : 2,
       timeoutMinutes: Number.isFinite(timeoutRaw) ? Math.max(1, Math.min(240, timeoutRaw)) : 40
     };
+  }
+
+  function normalizeRemoteBaseUrl(value) {
+    let base = String(value || '').trim().replace(/\/+$/, '');
+    base = base.replace(/\/api\/jobs$/i, '');
+    base = base.replace(/\/api$/i, '');
+    return base.replace(/\/+$/, '');
   }
 
   function maskValue(value, head = 2, tail = 2) {
@@ -125,8 +133,14 @@ function createHighlandReferralRouter(deps) {
   }
 
   function activeRunForUser(userId) {
+    return activeRunsForUser(userId)[0] || null;
+  }
+
+  function activeRunsForUser(userId) {
     ensureHighlandState();
-    return db().highlandReferralRuns.find(r => r.user_id === userId && ACTIVE_RUN_STATUSES.has(String(r.status || '')));
+    return db().highlandReferralRuns
+      .filter(r => r.user_id === userId && ACTIVE_RUN_STATUSES.has(String(r.status || '')))
+      .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
   }
 
   function latestFinishedRun(userId) {
@@ -183,6 +197,9 @@ function createHighlandReferralRouter(deps) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) {
+        if (res.status === 404) {
+          throw Object.assign(new Error('Địa chỉ API từ xa không đúng endpoint. Hãy nhập URL gốc của remote API, ví dụ https://your-api.onrender.com, không thêm /api hoặc /api/jobs'), { status: 502 });
+        }
         throw Object.assign(new Error(data.error || data.safeMessage || ('API từ xa lỗi HTTP ' + res.status)), { status: res.status || 502 });
       }
       return data;
@@ -276,11 +293,17 @@ function createHighlandReferralRouter(deps) {
     try {
       ensureHighlandState();
       if (cleanupStaleRuns()) await persist();
-      const active = activeRunForUser(req.user.id);
+      for (const run of activeRunsForUser(req.user.id)) {
+        await syncRemoteRun(run);
+      }
+      const activeRuns = activeRunsForUser(req.user.id);
+      const active = activeRuns[0] || null;
       res.json({
         settings: safeSettings(false),
         credits: ensureUserCredits(req.user),
         activeRun: safeRun(active, false),
+        activeRuns: activeRuns.map(r => safeRun(r, false)),
+        maxActiveRuns: HIGHLAND_MAX_ACTIVE_RUNS_PER_USER,
         runs: safeRunsForUser(req.user),
         user: safeUser(req.user)
       });
@@ -333,8 +356,11 @@ function createHighlandReferralRouter(deps) {
         if (!c.remoteBaseUrl || !c.remoteApiKey) throw Object.assign(new Error('Quản trị viên chưa cấu hình API từ xa'), { status: 400 });
         if (!REFERRAL_CODE_RE.test(referralCode)) throw Object.assign(new Error('Mã giới thiệu không hợp lệ'), { status: 400 });
         if (ensureUserCredits(req.user) <= 0) throw Object.assign(new Error('Bạn chưa có lượt Highlands Coffee'), { status: 400 });
-        if (activeRunForUser(req.user.id)) throw Object.assign(new Error('Bạn đang có một lượt Highlands Coffee đang xử lý'), { status: 409 });
-        assertCooldownPassed(req.user.id);
+        const activeRuns = activeRunsForUser(req.user.id);
+        if (activeRuns.length >= HIGHLAND_MAX_ACTIVE_RUNS_PER_USER) {
+          throw Object.assign(new Error(`Bạn chỉ được có tối đa ${HIGHLAND_MAX_ACTIVE_RUNS_PER_USER} lượt Highlands Coffee đang chờ/chạy`), { status: 409 });
+        }
+        if (!activeRuns.length) assertCooldownPassed(req.user.id);
 
         req.user.highlandReferralCredits = ensureUserCredits(req.user) - 1;
         const run = {
@@ -429,7 +455,7 @@ function createHighlandReferralRouter(deps) {
         settings.highlandReferralRunTimeoutMinutes = String(n);
       }
       if (req.body.highlandReferralRemoteBaseUrl !== undefined) {
-        const base = String(req.body.highlandReferralRemoteBaseUrl || '').trim().replace(/\/+$/, '');
+        const base = normalizeRemoteBaseUrl(req.body.highlandReferralRemoteBaseUrl);
         if (base && !/^https?:\/\//i.test(base)) return res.status(400).json({ error: 'Địa chỉ API từ xa phải bắt đầu bằng http hoặc https' });
         settings.highlandReferralRemoteBaseUrl = base;
       }
