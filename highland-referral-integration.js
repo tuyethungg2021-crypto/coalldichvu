@@ -3,6 +3,7 @@ const express = require('express');
 const ACTIVE_RUN_STATUSES = new Set(['creating_remote_job', 'queued', 'running']);
 const TERMINAL_REMOTE_STATUSES = new Set(['done', 'failed', 'timeout', 'cancelled']);
 const REFERRAL_CODE_RE = /^[A-Za-z0-9_-]{4,64}$/;
+const HIGHLAND_TARGET_SUCCESS_COUNT = 1;
 
 function createHighlandReferralRouter(deps) {
   const {
@@ -101,6 +102,7 @@ function createHighlandReferralRouter(deps) {
       attemptCount: Math.floor(Number(run.attemptCount || 0)),
       successCount: Math.floor(Number(run.successCount || 0)),
       failureCount: Math.floor(Number(run.failureCount || 0)),
+      targetSuccessCount: Math.max(1, Math.floor(Number(run.targetSuccessCount || HIGHLAND_TARGET_SUCCESS_COUNT))),
       created_at: run.created_at || '',
       started_at: run.started_at || '',
       finished_at: run.finished_at || '',
@@ -252,6 +254,7 @@ function createHighlandReferralRouter(deps) {
     run.attemptCount = Math.floor(Number(remote.attemptCount || run.attemptCount || 0));
     run.successCount = Math.floor(Number(remote.successCount || run.successCount || 0));
     run.failureCount = Math.floor(Number(remote.failureCount || run.failureCount || 0));
+    run.targetSuccessCount = Math.max(1, Math.floor(Number(remote.targetSuccesses || remote.targetSuccessCount || run.targetSuccessCount || HIGHLAND_TARGET_SUCCESS_COUNT)));
     run.safeMessage = String(remote.safeMessage || run.safeMessage || '');
 
     if (remoteStatus === 'done') {
@@ -351,6 +354,7 @@ function createHighlandReferralRouter(deps) {
           attemptCount: 0,
           successCount: 0,
           failureCount: 0,
+          targetSuccessCount: HIGHLAND_TARGET_SUCCESS_COUNT,
           result: null,
           created_at: now(),
           started_at: now(),

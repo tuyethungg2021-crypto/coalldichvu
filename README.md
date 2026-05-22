@@ -25,7 +25,7 @@ Web hỗ trợ bán lượt chạy Highland Referral cho user bằng số dư hi
 2. Vào tab **Admin Highland** để bật chức năng, đặt giá mỗi lượt, nhập Remote API URL và API key.
 3. User nạp tiền bằng các luồng hiện có, sau đó vào tab **Highland Referral** để mua lượt bằng số dư.
 4. Khi user nhập mã giới thiệu và submit, web reserve 1 lượt, gọi remote service từ backend, rồi tự poll trạng thái.
-5. Khi remote service hoàn thành đủ 5 lượt đăng ký thành công, web hiển thị `done` và lượt đã mua được tiêu thụ.
+5. Khi remote service hoàn thành 1 lượt đăng ký thành công, web hiển thị `done` và lượt đã mua được tiêu thụ.
 
 
 ## Tài khoản admin mặc định

@@ -240,7 +240,7 @@ function highlandMessageText(msg){
   return map[String(msg||'')] || String(msg||'');
 }
 function highlandStatusBadge(s){ const v=String(s||''); const cls=v==='done'?'status-ok':(['failed','timeout','cancelled'].includes(v)?'status-no':'status-wait'); return `<span class="badge ${cls}">${esc(highlandStatusText(v))}</span>`; }
-function highlandProgressText(r){ return Number(r.successCount||0) >= 5 || r.status === 'done' ? 'Thành công' : 'Đang xử lý'; }
+function highlandProgressText(r){ const status=String(r.status||''); const target=Math.max(1,Number(r.targetSuccessCount||1)); return status==='done' || (!['failed','timeout','cancelled'].includes(status) && Number(r.successCount||0) >= target) ? 'Thành công' : 'Đang xử lý'; }
 function highlandReferralCodeCache(){
   try{ return JSON.parse(localStorage.getItem('highlandReferralCodes')||'{}')||{}; }catch{ return {}; }
 }
