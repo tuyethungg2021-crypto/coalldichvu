@@ -22,6 +22,7 @@ function createHighlandReferralRouter(deps) {
   const router = express.Router();
   const purchaseLocks = new Set();
   const runLocks = new Set();
+  const historySyncLocks = new Set();
 
   function db() {
     return getDb();
@@ -320,8 +321,9 @@ function createHighlandReferralRouter(deps) {
     return run;
   }
 
-  async function syncRemoteRun(run) {
-    if (!shouldSyncRemoteRun(run)) return run;
+  async function syncRemoteRun(run, options = {}) {
+    if (!options.force && !shouldSyncRemoteRun(run)) return run;
+    if (!run || !run.remoteJobId) return run;
 
     let remote;
     try {
@@ -343,11 +345,25 @@ function createHighlandReferralRouter(deps) {
     return run;
   }
 
+  async function backgroundSyncHistoryForUser(userId) {
+    if (historySyncLocks.has(userId)) return;
+    historySyncLocks.add(userId);
+    try {
+      const runs = remoteBackedRunsForUser(userId, 20);
+      for (let i = 0; i < runs.length; i += 2) {
+        await Promise.all(runs.slice(i, i + 2).map(run => syncRemoteRun(run)));
+      }
+    } catch (err) {
+      console.error('Không đồng bộ được lịch sử Highlands Coffee:', sanitizeError(err));
+    } finally {
+      historySyncLocks.delete(userId);
+    }
+  }
+
   router.get('/api/highland-referral/status', auth, async (req, res) => {
     try {
       ensureHighlandState();
       if (cleanupStaleRuns()) await persist();
-      await Promise.all(remoteBackedRunsForUser(req.user.id).map(run => syncRemoteRun(run)));
       const activeRuns = activeRunsForUser(req.user.id);
       const active = activeRuns[0] || null;
       res.json({
@@ -356,11 +372,21 @@ function createHighlandReferralRouter(deps) {
         activeRun: safeRun(active, false),
         activeRuns: activeRuns.map(r => safeRun(r, false)),
         maxActiveRuns: HIGHLAND_MAX_ACTIVE_RUNS_PER_USER,
-        runs: safeRunsForUser(req.user),
         user: safeUser(req.user)
       });
     } catch (err) {
       res.status(err.status || 500).json({ error: sanitizeError(err) });
+    }
+  });
+
+  router.get('/api/highland-referral/history', auth, async (req, res) => {
+    try {
+      ensureHighlandState();
+      if (cleanupStaleRuns()) await persist();
+      res.json({ runs: safeRunsForUser(req.user), user: safeUser(req.user) });
+      setTimeout(() => backgroundSyncHistoryForUser(req.user.id), 0);
+    } catch (err) {
+      res.status(err.status || 500).json({ error: sanitizeError(err, 'Không tải được lịch sử Highlands Coffee') });
     }
   });
 
@@ -539,21 +565,39 @@ function createHighlandReferralRouter(deps) {
     }
   });
 
-  router.get('/api/admin/highland-referral/runs', auth, adminOnly, async (req, res) => {
+  router.get('/api/admin/highland-referral/runs', auth, adminOnly, (req, res) => {
+    ensureHighlandState();
+    const rows = db().highlandReferralRuns
+      .slice()
+      .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+      .slice(0, 100)
+      .map(r => safeRun(r, true));
+    res.json(rows);
+  });
+
+  async function syncAdminHighlandRunsBatch(req, res) {
     try {
       ensureHighlandState();
       if (cleanupStaleRuns()) await persist();
-      await Promise.all(recentRemoteBackedRuns(100).map(run => syncRemoteRun(run)));
+      const ids = Array.isArray(req.body.ids) ? req.body.ids.map(id => String(id)).slice(0, 2) : [];
+      const batch = ids.length
+        ? ids.map(id => db().highlandReferralRuns.find(r => r.id === id && r.remoteJobId)).filter(Boolean)
+        : recentRemoteBackedRuns(2);
+      await Promise.all(batch.map(run => syncRemoteRun(run, { force: true })));
+      const remaining = ids.length ? 0 : recentRemoteBackedRuns(100).length;
       const rows = db().highlandReferralRuns
         .slice()
         .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
         .slice(0, 100)
         .map(r => safeRun(r, true));
-      res.json(rows);
+      res.json({ synced: batch.length, remaining, rows });
     } catch (err) {
-      res.status(err.status || 500).json({ error: sanitizeError(err, 'Không tải được lịch sử Highlands Coffee') });
+      res.status(err.status || 500).json({ error: sanitizeError(err, 'Không đồng bộ được lịch sử Highlands Coffee') });
     }
-  });
+  }
+
+  router.get('/api/admin/highland-referral/runs/sync-batch', auth, adminOnly, syncAdminHighlandRunsBatch);
+  router.post('/api/admin/highland-referral/runs/sync-batch', auth, adminOnly, syncAdminHighlandRunsBatch);
 
   return router;
 }

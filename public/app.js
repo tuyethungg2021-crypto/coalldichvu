@@ -15,6 +15,9 @@ let binanceCountdownTimer = null;
 let highlandPollTimer = null;
 let highlandPollBusy = false;
 let highlandSubmitBusy = false;
+let highlandHistoryBusy = false;
+let highlandAdminSyncBusy = false;
+let highlandAdminRows = [];
 
 const $ = s => document.querySelector(s);
 const app = $('#app');
@@ -26,8 +29,10 @@ async function api(path, opts={}){
   if (!(opts.body instanceof FormData)) opts.headers['Content-Type'] = 'application/json';
   if (token) opts.headers.Authorization = 'Bearer ' + token;
   const res = await fetch(API + path, opts);
-  const data = await res.json().catch(()=>({}));
-  if(!res.ok) throw new Error(data.error || 'Có lỗi xảy ra');
+  const text = await res.text();
+  let data = {};
+  try{ data = text ? JSON.parse(text) : {}; }catch{ data = {}; }
+  if(!res.ok) throw new Error(data.error || text.slice(0,160) || `Có lỗi xảy ra (${res.status})`);
   return data;
 }
 function toast(msg, ok=true){
@@ -268,7 +273,8 @@ async function userHighlandReferral(){
   const s=d.settings||{};
   me=d.user||me;
   const activeRuns=highlandActiveRuns(d);
-  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Highlands Coffee</h2><div id="highlandStatusBox">${renderHighlandUserBox(d)}</div></div><div class="card"><h2>Lịch sử Highlands Coffee</h2><div id="highlandRunHistory">${tableHighlandRuns(d.runs||[])}</div></div>`);
+  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Highlands Coffee</h2><div id="highlandStatusBox">${renderHighlandUserBox(d)}</div></div><div class="card"><h2>Lịch sử Highlands Coffee</h2><div id="highlandRunHistory"><p class="muted">Đang tải lịch sử...</p></div></div>`);
+  setTimeout(()=>loadHighlandRunHistory(),0);
   if(s.enabled && activeRuns.length) startHighlandReferralPolling();
 }
 function renderHighlandUserBox(d){
@@ -284,8 +290,20 @@ async function refreshHighlandReferralBox(){
   const d=await api('/api/highland-referral/status');
   me=d.user||me;
   if($('#highlandStatusBox')) $('#highlandStatusBox').innerHTML=renderHighlandUserBox(d);
-  if($('#highlandRunHistory')) $('#highlandRunHistory').innerHTML=tableHighlandRuns(d.runs||[]);
   if(highlandActiveRuns(d).length) startHighlandReferralPolling(); else stopHighlandReferralPolling();
+}
+async function loadHighlandRunHistory(){
+  if(highlandHistoryBusy || !$('#highlandRunHistory')) return;
+  highlandHistoryBusy=true;
+  try{
+    const d=await api('/api/highland-referral/history');
+    me=d.user||me;
+    if($('#highlandRunHistory')) $('#highlandRunHistory').innerHTML=tableHighlandRuns(d.runs||[]);
+  }catch(e){
+    if($('#highlandRunHistory')) $('#highlandRunHistory').innerHTML=`<p class="muted">${esc(e.message||'Không tải được lịch sử Highlands Coffee')}</p>`;
+  }finally{
+    highlandHistoryBusy=false;
+  }
 }
 async function submitHighlandReferral(){
   if(highlandSubmitBusy) return;
@@ -354,11 +372,11 @@ async function pollHighlandRunOnce(runId){
     const d=await api('/api/highland-referral/status');
     me=d.user||me;
     if($('#highlandStatusBox')) $('#highlandStatusBox').innerHTML=renderHighlandUserBox(d);
-    if($('#highlandRunHistory')) $('#highlandRunHistory').innerHTML=tableHighlandRuns(d.runs||[]);
     if(!highlandActiveRuns(d).length){
       stopHighlandReferralPolling();
       highlandSubmitBusy=false;
       await loadMe();
+      loadHighlandRunHistory();
     }
   }catch(e){
     toast(e.message,false);
@@ -367,7 +385,7 @@ async function pollHighlandRunOnce(runId){
 async function adminHighlandReferral(){
   const d=await api('/api/admin/highland-referral/settings');
   const s=d.settings||{};
-  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Quản trị Highlands Coffee</h2><div class="row3"><div class="field"><label>Bật dịch vụ</label><select id="hrEnabled"><option value="0">Tắt</option><option value="1" ${s.enabled?'selected':''}>Bật</option></select></div><div class="field"><label>Giá / lượt</label><input id="hrPrice" type="number" min="0" value="${esc(s.price||0)}"></div><div class="field"><label>Thời gian chờ giữa 2 lượt (giây)</label><input id="hrCooldown" type="number" min="0" max="86400" value="${esc(s.cooldownSeconds||2)}"></div></div><div class="row"><div class="field"><label>Thời gian quá hạn xử lý (phút)</label><input id="hrTimeout" type="number" min="1" max="240" value="${esc(s.timeoutMinutes||40)}"></div><div class="field"><label>Địa chỉ API từ xa</label><input id="hrRemoteUrl" value="${esc(s.remoteBaseUrl||'')}" placeholder="https://dia-chi-dich-vu-cua-ban.example"></div></div><div class="field"><label>Khóa API từ xa mới</label><input id="hrRemoteKey" type="password" placeholder="${esc(s.remoteApiKeyMasked||'Để trống nếu không đổi')}"></div><p class="muted">Khóa API hiện tại: ${esc(s.remoteApiKeyMasked||'Chưa cài')}</p><div class="flex"><button onclick="saveHighlandAdminSettings()">Lưu cấu hình</button><button class="secondary" onclick="testHighlandRemote()">Kiểm tra kết nối</button><button class="secondary" onclick="loadAdminHighlandRuns()">Tải lịch sử</button></div><div id="hrAdminResult" class="notice" style="white-space:pre-wrap;margin-top:12px"></div></div><div class="card"><h2>Lịch sử Highlands Coffee</h2><div id="hrAdminRuns"><p class="muted">Bấm tải lịch sử để xem.</p></div></div>`);
+  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Quản trị Highlands Coffee</h2><div class="row3"><div class="field"><label>Bật dịch vụ</label><select id="hrEnabled"><option value="0">Tắt</option><option value="1" ${s.enabled?'selected':''}>Bật</option></select></div><div class="field"><label>Giá / lượt</label><input id="hrPrice" type="number" min="0" value="${esc(s.price||0)}"></div><div class="field"><label>Thời gian chờ giữa 2 lượt (giây)</label><input id="hrCooldown" type="number" min="0" max="86400" value="${esc(s.cooldownSeconds||2)}"></div></div><div class="row"><div class="field"><label>Thời gian quá hạn xử lý (phút)</label><input id="hrTimeout" type="number" min="1" max="240" value="${esc(s.timeoutMinutes||40)}"></div><div class="field"><label>Địa chỉ API từ xa</label><input id="hrRemoteUrl" value="${esc(s.remoteBaseUrl||'')}" placeholder="https://dia-chi-dich-vu-cua-ban.example"></div></div><div class="field"><label>Khóa API từ xa mới</label><input id="hrRemoteKey" type="password" placeholder="${esc(s.remoteApiKeyMasked||'Để trống nếu không đổi')}"></div><p class="muted">Khóa API hiện tại: ${esc(s.remoteApiKeyMasked||'Chưa cài')}</p><div class="flex"><button onclick="saveHighlandAdminSettings()">Lưu cấu hình</button><button class="secondary" onclick="testHighlandRemote()">Kiểm tra kết nối</button><button class="secondary" onclick="loadAdminHighlandRuns()">Tải lịch sử</button><button class="secondary" onclick="syncAdminHighlandRuns()">Đồng bộ trạng thái</button></div><div id="hrAdminResult" class="notice" style="white-space:pre-wrap;margin-top:12px"></div></div><div class="card"><h2>Lịch sử Highlands Coffee</h2><div id="hrAdminRuns"><p class="muted">Bấm tải lịch sử để xem.</p></div></div>`);
 }
 async function saveHighlandAdminSettings(){
   const payload={
@@ -390,7 +408,32 @@ async function testHighlandRemote(){
 }
 async function loadAdminHighlandRuns(){
   const box=$('#hrAdminRuns'); if(box) box.innerHTML='<p class="muted">Đang tải...</p>';
-  try{ const rows=await api('/api/admin/highland-referral/runs'); if(box) box.innerHTML=tableHighlandRuns(rows||[], false); }catch(e){ if(box) box.innerHTML='<p class="notice err">'+esc(e.message)+'</p>'; }
+  try{ const rows=await api('/api/admin/highland-referral/runs'); highlandAdminRows=rows||[]; if(box) box.innerHTML=tableHighlandRuns(highlandAdminRows, false); }catch(e){ if(box) box.innerHTML='<p class="notice err">'+esc(e.message)+'</p>'; }
+}
+async function syncAdminHighlandRuns(){
+  if(highlandAdminSyncBusy) return;
+  highlandAdminSyncBusy=true;
+  const result=$('#hrAdminResult');
+  const box=$('#hrAdminRuns');
+  let total=0;
+  try{
+    if(!highlandAdminRows.length) highlandAdminRows=await api('/api/admin/highland-referral/runs');
+    const ids=(highlandAdminRows||[]).filter(r=>r.remoteJobId).map(r=>r.id);
+    if(result) result.textContent='Đang đồng bộ trạng thái Highlands Coffee...';
+    for(let i=0;i<ids.length;i+=2){
+      const d=await api('/api/admin/highland-referral/runs/sync-batch',{method:'POST',body:JSON.stringify({ids:ids.slice(i,i+2)})});
+      total+=Number(d.synced||0);
+      highlandAdminRows=d.rows||highlandAdminRows;
+      if(box) box.innerHTML=tableHighlandRuns(highlandAdminRows, false);
+      if(result) result.textContent=`Đã đồng bộ ${total}/${ids.length} lượt`;
+    }
+    toast('Đã đồng bộ trạng thái Highlands Coffee');
+  }catch(e){
+    if(result) result.textContent=e.message;
+    toast(e.message,false);
+  }finally{
+    highlandAdminSyncBusy=false;
+  }
 }
 
 async function userDeposit(){
