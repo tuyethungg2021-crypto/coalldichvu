@@ -1,11 +1,13 @@
 const express = require('express');
 
 const ACTIVE_RUN_STATUSES = new Set(['creating_remote_job', 'queued', 'running']);
-const REMOTE_SYNCABLE_LOCAL_STATUSES = new Set([...ACTIVE_RUN_STATUSES, 'timeout']);
 const TERMINAL_REMOTE_STATUSES = new Set(['done', 'failed', 'timeout', 'cancelled']);
 const REFERRAL_CODE_RE = /^[A-Za-z0-9_-]{4,64}$/;
 const HIGHLAND_TARGET_SUCCESS_COUNT = 1;
 const HIGHLAND_MAX_ACTIVE_RUNS_PER_USER = 5;
+const REMOTE_STATUS_CACHE_MS = 15000;
+const USER_REMOTE_SYNC_LIMIT = 8;
+const ADMIN_REMOTE_SYNC_LIMIT = 20;
 
 function createHighlandReferralRouter(deps) {
   const {
@@ -145,15 +147,33 @@ function createHighlandReferralRouter(deps) {
   }
 
   function shouldSyncRemoteRun(run) {
-    return !!(run && run.remoteJobId && REMOTE_SYNCABLE_LOCAL_STATUSES.has(String(run.status || '')));
+    if (!run || !run.remoteJobId) return false;
+    const checkedAt = new Date(run.remoteCheckedAt || 0).getTime();
+    if (Number.isFinite(checkedAt) && Date.now() - checkedAt < REMOTE_STATUS_CACHE_MS) return false;
+    const status = String(run.status || '');
+    if (!TERMINAL_REMOTE_STATUSES.has(status)) return true;
+    return String(run.remoteStatus || '') !== status;
   }
 
-  function syncableRunsForUser(userId, limit = 20) {
+  function remoteBackedRunsForUser(userId, limit = USER_REMOTE_SYNC_LIMIT) {
     ensureHighlandState();
     return db().highlandReferralRuns
       .filter(r => r.user_id === userId && shouldSyncRemoteRun(r))
       .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
       .slice(0, limit);
+  }
+
+  function recentRemoteBackedRuns(limit = ADMIN_REMOTE_SYNC_LIMIT) {
+    ensureHighlandState();
+    return db().highlandReferralRuns
+      .filter(r => shouldSyncRemoteRun(r))
+      .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+      .slice(0, limit);
+  }
+
+  function runExpired(run) {
+    const expires = new Date(run.expires_at || 0).getTime();
+    return Number.isFinite(expires) && Date.now() > expires;
   }
 
   function latestFinishedRun(userId) {
@@ -225,19 +245,27 @@ function createHighlandReferralRouter(deps) {
   }
 
   function releaseReservedCredit(run, reason) {
-    if (!run || !run.reservedCredit || run.creditFinalized || run.creditReleased) return false;
+    if (!run || run.creditReleased) return false;
+    if (!run.reservedCredit && !run.creditFinalized) return false;
     const user = db().users.find(u => u.id === run.user_id);
     if (!user) return false;
     user.highlandReferralCredits = ensureUserCredits(user) + 1;
     run.reservedCredit = false;
+    run.creditFinalized = false;
     run.creditReleased = true;
     run.safeMessage = reason || run.safeMessage || 'Đã hoàn lại lượt sử dụng';
     return true;
   }
 
   function finalizeReservedCredit(run) {
-    if (!run || !run.reservedCredit || run.creditFinalized || run.creditReleased) return false;
+    if (!run) return false;
+    if (run.creditReleased && !run.creditFinalized) {
+      const user = db().users.find(u => u.id === run.user_id);
+      if (user) user.highlandReferralCredits = Math.max(0, ensureUserCredits(user) - 1);
+    }
+    if (!run.reservedCredit && run.creditFinalized && !run.creditReleased) return false;
     run.reservedCredit = false;
+    run.creditReleased = false;
     run.creditFinalized = true;
     run.safeMessage = 'Hoàn tất';
     return true;
@@ -255,8 +283,8 @@ function createHighlandReferralRouter(deps) {
     let changed = false;
     for (const run of db().highlandReferralRuns) {
       if (!ACTIVE_RUN_STATUSES.has(String(run.status || ''))) continue;
-      const expires = new Date(run.expires_at || 0).getTime();
-      if (Number.isFinite(expires) && Date.now() > expires) {
+      if (run.remoteJobId) continue;
+      if (runExpired(run)) {
         releaseReservedCredit(run, 'Đã hoàn lại lượt do phiên xử lý quá hạn');
         markRunTerminal(run, 'timeout', 'Phiên xử lý quá hạn');
         changed = true;
@@ -265,41 +293,52 @@ function createHighlandReferralRouter(deps) {
     return changed;
   }
 
-  async function syncRemoteRun(run) {
-    if (!shouldSyncRemoteRun(run)) return run;
-    if (cleanupStaleRuns()) await persist();
-    if (!shouldSyncRemoteRun(run)) return run;
-
-    let remote;
-    try {
-      remote = await remoteFetch('/api/jobs/' + encodeURIComponent(run.remoteJobId), { timeoutMs: 15000 });
-    } catch (err) {
-      run.safeError = sanitizeError(err, 'Không kết nối được API từ xa');
-      await persist();
-      return run;
-    }
-
-    const remoteStatus = String(remote.status || '').toLowerCase();
+  function applyRemoteJobToRun(run, remote) {
+    const hasActualStatus = remote.actualStatus !== undefined && remote.actualStatus !== null && remote.actualStatus !== '';
+    const remoteStatus = String(hasActualStatus ? remote.actualStatus : remote.status || '').toLowerCase();
     run.remoteStatus = remoteStatus;
     run.attemptCount = Math.floor(Number(remote.attemptCount || run.attemptCount || 0));
-    run.successCount = Math.floor(Number(remote.successCount || run.successCount || 0));
+    run.successCount = hasActualStatus && remoteStatus !== 'done' ? 0 : Math.floor(Number(remote.successCount || run.successCount || 0));
     run.failureCount = Math.floor(Number(remote.failureCount || run.failureCount || 0));
     run.targetSuccessCount = Math.max(1, Math.floor(Number(remote.targetSuccesses || remote.targetSuccessCount || run.targetSuccessCount || HIGHLAND_TARGET_SUCCESS_COUNT)));
     run.safeMessage = String(remote.safeMessage || run.safeMessage || '');
+    run.safeError = '';
 
     if (remoteStatus === 'done') {
       finalizeReservedCredit(run);
       markRunTerminal(run, 'done', '');
       run.remoteStatus = 'done';
-      run.safeError = '';
       run.result = remote.result || null;
     } else if (TERMINAL_REMOTE_STATUSES.has(remoteStatus)) {
       releaseReservedCredit(run, 'Đã hoàn lại lượt vì lượt xử lý từ xa không hoàn thành');
       markRunTerminal(run, remoteStatus === 'timeout' ? 'timeout' : 'failed', sanitizeError(remote.safeError || remote.error || remote.safeMessage, 'Lượt xử lý từ xa không hoàn thành'));
     } else {
       run.status = remoteStatus === 'queued' ? 'queued' : 'running';
+      run.finished_at = '';
       run.updated_at = now();
     }
+    return run;
+  }
+
+  async function syncRemoteRun(run) {
+    if (!shouldSyncRemoteRun(run)) return run;
+
+    let remote;
+    try {
+      remote = await remoteFetch('/api/jobs/' + encodeURIComponent(run.remoteJobId), { timeoutMs: 15000 });
+    } catch (err) {
+      run.remoteCheckedAt = now();
+      run.safeError = sanitizeError(err, 'Không kết nối được API từ xa');
+      if (runExpired(run)) {
+        releaseReservedCredit(run, 'Đã hoàn lại lượt do không lấy được trạng thái API từ xa trước khi quá hạn');
+        markRunTerminal(run, 'timeout', 'Không lấy được trạng thái API từ xa trước khi quá hạn');
+      }
+      await persist();
+      return run;
+    }
+
+    applyRemoteJobToRun(run, remote);
+    run.remoteCheckedAt = now();
     await persist();
     return run;
   }
@@ -308,9 +347,7 @@ function createHighlandReferralRouter(deps) {
     try {
       ensureHighlandState();
       if (cleanupStaleRuns()) await persist();
-      for (const run of syncableRunsForUser(req.user.id)) {
-        await syncRemoteRun(run);
-      }
+      await Promise.all(remoteBackedRunsForUser(req.user.id).map(run => syncRemoteRun(run)));
       const activeRuns = activeRunsForUser(req.user.id);
       const active = activeRuns[0] || null;
       res.json({
@@ -365,6 +402,7 @@ function createHighlandReferralRouter(deps) {
       const out = await withUserLock(runLocks, req.user.id, async () => {
         ensureHighlandState();
         if (cleanupStaleRuns()) await persist();
+        await Promise.all(remoteBackedRunsForUser(req.user.id).map(run => syncRemoteRun(run)));
         const c = cfg();
         const referralCode = String(req.body.referralCode || '').trim();
         if (!c.enabled) throw Object.assign(new Error('Dịch vụ Highlands Coffee đang tắt'), { status: 400 });
@@ -414,9 +452,8 @@ function createHighlandReferralRouter(deps) {
           });
           run.remoteJobId = String(remote.jobId || remote.id || '');
           if (!run.remoteJobId) throw new Error('API từ xa không trả mã lượt xử lý');
-          run.status = String(remote.status || 'queued').toLowerCase();
-          run.remoteStatus = run.status;
-          run.safeMessage = 'Đã tạo lượt xử lý từ xa';
+          applyRemoteJobToRun(run, remote);
+          if (!TERMINAL_REMOTE_STATUSES.has(String(run.status || ''))) run.safeMessage = 'Đã tạo lượt xử lý từ xa';
           run.updated_at = now();
           await persist();
         } catch (err) {
@@ -502,14 +539,20 @@ function createHighlandReferralRouter(deps) {
     }
   });
 
-  router.get('/api/admin/highland-referral/runs', auth, adminOnly, (req, res) => {
-    ensureHighlandState();
-    const rows = db().highlandReferralRuns
-      .slice()
-      .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
-      .slice(0, 100)
-      .map(r => safeRun(r, true));
-    res.json(rows);
+  router.get('/api/admin/highland-referral/runs', auth, adminOnly, async (req, res) => {
+    try {
+      ensureHighlandState();
+      if (cleanupStaleRuns()) await persist();
+      await Promise.all(recentRemoteBackedRuns(100).map(run => syncRemoteRun(run)));
+      const rows = db().highlandReferralRuns
+        .slice()
+        .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+        .slice(0, 100)
+        .map(r => safeRun(r, true));
+      res.json(rows);
+    } catch (err) {
+      res.status(err.status || 500).json({ error: sanitizeError(err, 'Không tải được lịch sử Highlands Coffee') });
+    }
   });
 
   return router;
