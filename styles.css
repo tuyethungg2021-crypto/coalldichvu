@@ -12,3 +12,81 @@ body{overflow-x:hidden}.admin-service-list{display:grid;gap:12px}.admin-service-
 
 .copy-cell{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.copy-btn{white-space:nowrap}
 .desc-box{margin:8px 0 10px}.live-desc{white-space:pre-line;margin:0 0 8px}.copy-desc-btn{margin-bottom:8px}
+
+/* Compact service layout update: make service cards smaller so "Sim đang thuê" is visible sooner */
+.servicegrid{
+  grid-template-columns:repeat(auto-fill,minmax(165px,1fr));
+  gap:10px;
+}
+.svc{
+  padding:10px;
+  border-radius:14px;
+  min-height:0;
+}
+.svc h3{
+  font-size:17px;
+  line-height:1.18;
+  margin:0 0 4px;
+}
+.svc .field{
+  margin-bottom:7px;
+}
+.svc .field label{
+  font-size:13px;
+  margin-bottom:4px;
+}
+.svc .field select,
+.svc .field input{
+  padding:8px 10px;
+  border-radius:10px;
+}
+.svc .price{
+  font-size:20px;
+  line-height:1.1;
+  margin:4px 0;
+}
+.svc button{
+  padding:8px 12px;
+  border-radius:10px;
+}
+.desc-box{
+  margin:4px 0 6px;
+}
+.live-desc{
+  max-height:34px;
+  overflow:hidden;
+  font-size:13px;
+  line-height:1.25;
+  margin:0 0 5px;
+}
+.copy-desc-btn,
+.svc button.small{
+  padding:6px 9px;
+  font-size:12px;
+  border-radius:8px;
+}
+.svc-img{
+  height:80px;
+  border-radius:12px;
+  margin-bottom:7px;
+}
+.card{
+  padding:14px 16px;
+  margin-bottom:14px;
+}
+.card h2{
+  font-size:24px;
+  margin-bottom:10px;
+}
+#activeRentals .table th,
+#activeRentals .table td{
+  padding:8px;
+}
+@media(min-width:1200px){
+  .servicegrid{grid-template-columns:repeat(auto-fill,minmax(155px,1fr));}
+}
+@media(max-width:700px){
+  .servicegrid{grid-template-columns:repeat(2,minmax(0,1fr));}
+  .svc h3{font-size:15px;}
+  .svc .price{font-size:18px;}
+}
