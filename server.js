@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -60,7 +61,7 @@ function daysInactive(u) {
 }
 
 const defaults = {
-  users: [], sessions: [], services: [], rentals: [], deposits: [], notifications: [], dmxProducts: [], dmxOrders: [], sepayTransactions: [], binanceTransactions: [],
+  users: [], services: [], rentals: [], deposits: [], notifications: [], dmxProducts: [], dmxOrders: [], sepayTransactions: [], binanceTransactions: [],
   settings: {
     siteName: 'Có All Dịch Vụ',
     brandText: 'Thuê sim nhanh - nhiều nhà mạng - quản lý dễ dàng',
@@ -92,7 +93,7 @@ let db = null;
 
 function normalizeDb(parsed) {
   parsed = parsed || {};
-  return { ...defaults, ...parsed, sessions: parsed.sessions || [], dmxProducts: parsed.dmxProducts || [], dmxOrders: parsed.dmxOrders || [], sepayTransactions: parsed.sepayTransactions || [], binanceTransactions: parsed.binanceTransactions || [], settings: { ...defaults.settings, ...(parsed.settings || {}) } };
+  return { ...defaults, ...parsed, dmxProducts: parsed.dmxProducts || [], dmxOrders: parsed.dmxOrders || [], sepayTransactions: parsed.sepayTransactions || [], binanceTransactions: parsed.binanceTransactions || [], settings: { ...defaults.settings, ...(parsed.settings || {}) } };
 }
 async function loadDb() {
   if (MONGODB_URI) {
@@ -151,9 +152,23 @@ async function migrate() {
 }
 
 app.use(cors());
+// Nén JSON/HTML/CSS/JS để giảm băng thông outbound trên Render.
+app.use(compression({ threshold: 1024 }));
 app.use(express.json({ limit: '10mb' }));
-app.use('/uploads', express.static(uploadDir));
-app.use(express.static(path.join(root, 'public')));
+
+// Cache file tĩnh để khách không tải lại JS/CSS/ảnh ở mỗi lần mở trang.
+const staticCache = {
+  maxAge: '7d',
+  etag: true,
+  lastModified: true,
+  setHeaders(res, filePath) {
+    if (/\.(?:js|css|png|jpg|jpeg|gif|webp|svg|ico|woff2?)$/i.test(filePath)) {
+      res.setHeader('Cache-Control', 'public, max-age=604800, must-revalidate');
+    }
+  }
+};
+app.use('/uploads', express.static(uploadDir, staticCache));
+app.use(express.static(path.join(root, 'public'), staticCache));
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 function uploadToCloudinary(file, folder = 'coalldichvu') {
@@ -175,42 +190,7 @@ function uploadToCloudinary(file, folder = 'coalldichvu') {
   });
 }
 
-const MAX_ACTIVE_SESSIONS_PER_USER = 5;
-const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-function getReqIp(req) {
-  return String((req.headers['x-forwarded-for'] || '').split(',')[0] || req.ip || req.socket?.remoteAddress || '').slice(0, 80);
-}
-function cleanExpiredSessions() {
-  const cutoff = Date.now() - SESSION_TTL_MS;
-  const before = db.sessions.length;
-  db.sessions = (db.sessions || []).filter(s => s && s.active !== false && new Date(s.created_at || 0).getTime() >= cutoff);
-  return db.sessions.length !== before;
-}
-function createLoginSession(user, req) {
-  if (!Array.isArray(db.sessions)) db.sessions = [];
-  cleanExpiredSessions();
-  const session = {
-    id: uid('sess'),
-    user_id: user.id,
-    active: true,
-    created_at: now(),
-    last_seen_at: now(),
-    ip: getReqIp(req),
-    user_agent: String(req.headers['user-agent'] || '').slice(0, 220)
-  };
-  db.sessions.push(session);
-  const active = db.sessions
-    .filter(s => s.user_id === user.id && s.active !== false)
-    .sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
-  // Luôn chỉ giữ tối đa 5 phiên đăng nhập hợp lệ / tài khoản.
-  // Khi đăng nhập thiết bị thứ 6, phiên cũ nhất sẽ bị thu hồi để không vượt quá 5 thiết bị.
-  while (active.length > MAX_ACTIVE_SESSIONS_PER_USER) {
-    const old = active.shift();
-    if (old) old.active = false;
-  }
-  return session;
-}
-function sign(user, sessionId) { return jwt.sign({ id: user.id, username: user.username, role: user.role, sid: sessionId }, JWT_SECRET, { expiresIn: '7d' }); }
+function sign(user) { return jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: '7d' }); }
 function cleanUser(u) { return u ? { id: u.id, username: u.username, role: u.role, balance: u.balance || 0, created_at: u.created_at, last_login: u.last_login, status: u.status || 'active' } : null; }
 function auth(req, res, next) {
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/, '');
@@ -219,18 +199,7 @@ function auth(req, res, next) {
     const decoded = jwt.verify(token, JWT_SECRET);
     const user = db.users.find(u => u.id === decoded.id);
     if (!user || user.status !== 'active') return res.status(401).json({ error: 'Tài khoản không hợp lệ hoặc đã bị khóa/xóa' });
-    if (!decoded.sid) return res.status(401).json({ error: 'Phiên đăng nhập cũ không còn hợp lệ, vui lòng đăng nhập lại' });
-    if (!Array.isArray(db.sessions)) db.sessions = [];
-    const session = db.sessions.find(s => s.id === decoded.sid && s.user_id === user.id && s.active !== false);
-    if (!session) return res.status(401).json({ error: 'Phiên đăng nhập đã bị thu hồi do vượt quá 5 thiết bị hoặc đã hết hạn' });
-    if (new Date(session.created_at || 0).getTime() < Date.now() - SESSION_TTL_MS) {
-      session.active = false; saveDb();
-      return res.status(401).json({ error: 'Phiên đăng nhập hết hạn' });
-    }
-    session.last_seen_at = now();
-    req.user = user;
-    req.session = session;
-    next();
+    req.user = user; next();
   } catch { res.status(401).json({ error: 'Phiên đăng nhập hết hạn' }); }
 }
 function adminOnly(req, res, next) { if (req.user.role !== 'admin') return res.status(403).json({ error: 'Chỉ admin được dùng chức năng này' }); next(); }
@@ -434,10 +403,8 @@ app.post('/api/register', (req, res) => {
   if (password.length < 6) return res.status(400).json({ error: 'Mật khẩu tối thiểu 6 ký tự' });
   if (db.users.some(u => u.username === username)) return res.status(400).json({ error: 'Tên đăng nhập đã tồn tại' });
   const user = { id: uid('u'), username, password_hash: bcrypt.hashSync(password, 10), role: 'user', balance: 0, created_at: now(), last_login: now(), status: 'active' };
-  db.users.push(user);
-  const session = createLoginSession(user, req);
-  saveDb();
-  res.json({ token: sign(user, session.id), user: cleanUser(user) });
+  db.users.push(user); saveDb();
+  res.json({ token: sign(user), user: cleanUser(user) });
 });
 
 app.post('/api/login', (req, res) => {
@@ -446,15 +413,8 @@ app.post('/api/login', (req, res) => {
   const user = db.users.find(u => u.username === username);
   if (!user || !bcrypt.compareSync(password, user.password_hash)) return res.status(400).json({ error: 'Sai tài khoản hoặc mật khẩu' });
   if (user.status !== 'active') return res.status(403).json({ error: 'Tài khoản đã bị khóa/xóa' });
-  user.last_login = now();
-  const session = createLoginSession(user, req);
-  saveDb();
-  res.json({ token: sign(user, session.id), user: cleanUser(user) });
-});
-app.post('/api/logout', auth, (req, res) => {
-  if (req.session) req.session.active = false;
-  saveDb();
-  res.json({ ok: true });
+  user.last_login = now(); saveDb();
+  res.json({ token: sign(user), user: cleanUser(user) });
 });
 app.get('/api/me', auth, (req, res) => res.json({ user: cleanUser(req.user) }));
 
@@ -551,7 +511,35 @@ app.post('/api/rentals', auth, async (req, res) => withUserRentLock(req.user.id,
     res.status(500).json({ error: e.message || 'Không gọi được API thuê sim', user: cleanUser(req.user) });
   }
 }));
-app.get('/api/rentals', auth, async (req, res) => { await processExpiredRentals(); res.json(db.rentals.filter(r => r.user_id === req.user.id).sort((a,b) => b.rented_at.localeCompare(a.rented_at))); });
+function rentalSortNewest(a, b) { return String(b.rented_at || '').localeCompare(String(a.rented_at || '')); }
+function isRentalWaitingOtp(r) {
+  return r && r.external_id && !r.otp_code && !r.refunded && String(r.status || '').toLowerCase().includes('chờ');
+}
+function publicRentalList(rows) {
+  return rows.map(r => ({
+    id: r.id, user_id: r.user_id, service_id: r.service_id, service_name: r.service_name,
+    network: r.network, phone_number: r.phone_number, price: r.price,
+    external_id: r.external_id, status: r.status, rented_at: r.rented_at, ended_at: r.ended_at,
+    otp_code: r.otp_code, sms: r.sms, refunded: r.refunded, note: r.note
+  }));
+}
+app.get('/api/rentals', auth, async (req, res) => {
+  await processExpiredRentals();
+  const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10) || 50, 1), 200);
+  const rows = db.rentals
+    .filter(r => r.user_id === req.user.id)
+    .sort(rentalSortNewest)
+    .slice(0, limit);
+  res.json(publicRentalList(rows));
+});
+app.get('/api/rentals/active', auth, async (req, res) => {
+  await processExpiredRentals();
+  const rows = db.rentals
+    .filter(r => r.user_id === req.user.id)
+    .filter(r => isRentalWaitingOtp(r) || String(r.status || '') === 'Đang thuê' || (r.otp_code && r.ended_at && (Date.now() - new Date(r.ended_at).getTime()) < 120000))
+    .sort(rentalSortNewest);
+  res.json(publicRentalList(rows));
+});
 app.get('/api/rentals/stats', auth, async (req, res) => { await processExpiredRentals(); res.json(buildDailyStats(String(req.query.date || '').trim(), req.user.id)); });
 
 app.post('/api/rentals/:id/check-code', auth, async (req, res) => {
@@ -936,7 +924,10 @@ app.post('/api/upload', auth, adminOnly, upload.single('file'), async (req, res)
   } catch (e) { res.status(500).json({ error: e.message || 'Không upload được ảnh' }); }
 });
 
-app.get('/api/admin/users', auth, adminOnly, (req, res) => res.json(db.users.map(u => ({ ...cleanUser(u), days_inactive: daysInactive(u) })).sort((a,b) => a.role.localeCompare(b.role) || a.username.localeCompare(b.username))));
+app.get('/api/admin/users', auth, adminOnly, (req, res) => {
+  const limit = Math.min(Math.max(parseInt(req.query.limit || '300', 10) || 300, 1), 1000);
+  res.json(db.users.map(u => ({ ...cleanUser(u), days_inactive: daysInactive(u) })).sort((a,b) => a.role.localeCompare(b.role) || a.username.localeCompare(b.username)).slice(0, limit));
+});
 app.patch('/api/admin/users/:id', auth, adminOnly, (req, res) => {
   const user = db.users.find(u => u.id === req.params.id); if (!user) return res.status(404).json({ error: 'Không tìm thấy user' });
   if (req.body.balance !== undefined) user.balance = Math.floor(Number(req.body.balance || 0));
@@ -1049,13 +1040,20 @@ function buildDailyStats(dateKey, userId = '') {
   };
 }
 function buildAdminDailyStats(dateKey) { return buildDailyStats(dateKey); }
-app.get('/api/admin/rentals', auth, adminOnly, async (req, res) => { await processExpiredRentals(); res.json(db.rentals.map(r => ({ ...r, username: (db.users.find(u => u.id === r.user_id) || {}).username || 'unknown' })).sort((a,b) => b.rented_at.localeCompare(a.rented_at))); });
+app.get('/api/admin/rentals', auth, adminOnly, async (req, res) => {
+  await processExpiredRentals();
+  const limit = Math.min(Math.max(parseInt(req.query.limit || '300', 10) || 300, 1), 1000);
+  res.json(db.rentals.map(r => ({ ...r, username: (db.users.find(u => u.id === r.user_id) || {}).username || 'unknown' })).sort(rentalSortNewest).slice(0, limit));
+});
 app.get('/api/admin/rentals/stats', auth, adminOnly, async (req, res) => { await processExpiredRentals(); res.json(buildAdminDailyStats(String(req.query.date || '').trim())); });
 app.patch('/api/admin/rentals/:id', auth, adminOnly, (req, res) => {
   const r = db.rentals.find(x => x.id === req.params.id); if (!r) return res.status(404).json({ error: 'Không tìm thấy lượt thuê' });
   ['status','otp_code','note','ended_at'].forEach(k => { if (req.body[k] !== undefined) r[k] = String(req.body[k]); }); saveDb(); res.json(r);
 });
-app.get('/api/admin/deposits', auth, adminOnly, (req, res) => res.json(db.deposits.map(d => ({ ...d, username: (db.users.find(u => u.id === d.user_id) || {}).username || 'unknown' })).sort((a,b) => b.created_at.localeCompare(a.created_at))));
+app.get('/api/admin/deposits', auth, adminOnly, (req, res) => {
+  const limit = Math.min(Math.max(parseInt(req.query.limit || '300', 10) || 300, 1), 1000);
+  res.json(db.deposits.map(d => ({ ...d, username: (db.users.find(u => u.id === d.user_id) || {}).username || 'unknown' })).sort((a,b) => String(b.created_at || '').localeCompare(String(a.created_at || ''))).slice(0, limit));
+});
 app.patch('/api/admin/deposits/:id', auth, adminOnly, (req, res) => {
   const d = db.deposits.find(x => x.id === req.params.id); if (!d) return res.status(404).json({ error: 'Không tìm thấy yêu cầu nạp' });
   const newStatus = String(req.body.status || d.status);

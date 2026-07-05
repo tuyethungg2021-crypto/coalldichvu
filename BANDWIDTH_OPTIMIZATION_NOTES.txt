@@ -1,0 +1,12 @@
+Đã tối ưu giảm băng thông Render:
+
+1) Bật gzip compression cho JSON/HTML/CSS/JS.
+2) Bật cache static file /uploads và /public 7 ngày.
+3) API /api/rentals mặc định chỉ trả 50 bản ghi mới nhất, có thể dùng ?limit=.
+4) Thêm API /api/rentals/active chỉ trả sim đang hoạt động/chờ OTP.
+5) Frontend tự lấy OTP mỗi 20 giây thay vì 8 giây.
+6) Frontend polling OTP dùng /api/rentals/active thay vì tải toàn bộ lịch sử.
+7) Tắt polling mô tả dịch vụ/sản phẩm mỗi 8 giây.
+8) Admin users/rentals/deposits mặc định giới hạn 300 bản ghi để tránh tải quá nặng.
+
+Sau khi deploy lên Render, buildCommand npm install sẽ tự cài package compression.
