@@ -60,7 +60,7 @@ function daysInactive(u) {
 }
 
 const defaults = {
-  users: [], services: [], rentals: [], deposits: [], notifications: [], dmxProducts: [], dmxOrders: [], sepayTransactions: [], binanceTransactions: [],
+  users: [], sessions: [], services: [], rentals: [], deposits: [], notifications: [], dmxProducts: [], dmxOrders: [], sepayTransactions: [], binanceTransactions: [],
   settings: {
     siteName: 'Có All Dịch Vụ',
     brandText: 'Thuê sim nhanh - nhiều nhà mạng - quản lý dễ dàng',
@@ -92,7 +92,7 @@ let db = null;
 
 function normalizeDb(parsed) {
   parsed = parsed || {};
-  return { ...defaults, ...parsed, dmxProducts: parsed.dmxProducts || [], dmxOrders: parsed.dmxOrders || [], sepayTransactions: parsed.sepayTransactions || [], binanceTransactions: parsed.binanceTransactions || [], settings: { ...defaults.settings, ...(parsed.settings || {}) } };
+  return { ...defaults, ...parsed, sessions: parsed.sessions || [], dmxProducts: parsed.dmxProducts || [], dmxOrders: parsed.dmxOrders || [], sepayTransactions: parsed.sepayTransactions || [], binanceTransactions: parsed.binanceTransactions || [], settings: { ...defaults.settings, ...(parsed.settings || {}) } };
 }
 async function loadDb() {
   if (MONGODB_URI) {
@@ -175,7 +175,42 @@ function uploadToCloudinary(file, folder = 'coalldichvu') {
   });
 }
 
-function sign(user) { return jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: '7d' }); }
+const MAX_ACTIVE_SESSIONS_PER_USER = 5;
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+function getReqIp(req) {
+  return String((req.headers['x-forwarded-for'] || '').split(',')[0] || req.ip || req.socket?.remoteAddress || '').slice(0, 80);
+}
+function cleanExpiredSessions() {
+  const cutoff = Date.now() - SESSION_TTL_MS;
+  const before = db.sessions.length;
+  db.sessions = (db.sessions || []).filter(s => s && s.active !== false && new Date(s.created_at || 0).getTime() >= cutoff);
+  return db.sessions.length !== before;
+}
+function createLoginSession(user, req) {
+  if (!Array.isArray(db.sessions)) db.sessions = [];
+  cleanExpiredSessions();
+  const session = {
+    id: uid('sess'),
+    user_id: user.id,
+    active: true,
+    created_at: now(),
+    last_seen_at: now(),
+    ip: getReqIp(req),
+    user_agent: String(req.headers['user-agent'] || '').slice(0, 220)
+  };
+  db.sessions.push(session);
+  const active = db.sessions
+    .filter(s => s.user_id === user.id && s.active !== false)
+    .sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
+  // Luôn chỉ giữ tối đa 5 phiên đăng nhập hợp lệ / tài khoản.
+  // Khi đăng nhập thiết bị thứ 6, phiên cũ nhất sẽ bị thu hồi để không vượt quá 5 thiết bị.
+  while (active.length > MAX_ACTIVE_SESSIONS_PER_USER) {
+    const old = active.shift();
+    if (old) old.active = false;
+  }
+  return session;
+}
+function sign(user, sessionId) { return jwt.sign({ id: user.id, username: user.username, role: user.role, sid: sessionId }, JWT_SECRET, { expiresIn: '7d' }); }
 function cleanUser(u) { return u ? { id: u.id, username: u.username, role: u.role, balance: u.balance || 0, created_at: u.created_at, last_login: u.last_login, status: u.status || 'active' } : null; }
 function auth(req, res, next) {
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/, '');
@@ -184,7 +219,18 @@ function auth(req, res, next) {
     const decoded = jwt.verify(token, JWT_SECRET);
     const user = db.users.find(u => u.id === decoded.id);
     if (!user || user.status !== 'active') return res.status(401).json({ error: 'Tài khoản không hợp lệ hoặc đã bị khóa/xóa' });
-    req.user = user; next();
+    if (!decoded.sid) return res.status(401).json({ error: 'Phiên đăng nhập cũ không còn hợp lệ, vui lòng đăng nhập lại' });
+    if (!Array.isArray(db.sessions)) db.sessions = [];
+    const session = db.sessions.find(s => s.id === decoded.sid && s.user_id === user.id && s.active !== false);
+    if (!session) return res.status(401).json({ error: 'Phiên đăng nhập đã bị thu hồi do vượt quá 5 thiết bị hoặc đã hết hạn' });
+    if (new Date(session.created_at || 0).getTime() < Date.now() - SESSION_TTL_MS) {
+      session.active = false; saveDb();
+      return res.status(401).json({ error: 'Phiên đăng nhập hết hạn' });
+    }
+    session.last_seen_at = now();
+    req.user = user;
+    req.session = session;
+    next();
   } catch { res.status(401).json({ error: 'Phiên đăng nhập hết hạn' }); }
 }
 function adminOnly(req, res, next) { if (req.user.role !== 'admin') return res.status(403).json({ error: 'Chỉ admin được dùng chức năng này' }); next(); }
@@ -388,8 +434,10 @@ app.post('/api/register', (req, res) => {
   if (password.length < 6) return res.status(400).json({ error: 'Mật khẩu tối thiểu 6 ký tự' });
   if (db.users.some(u => u.username === username)) return res.status(400).json({ error: 'Tên đăng nhập đã tồn tại' });
   const user = { id: uid('u'), username, password_hash: bcrypt.hashSync(password, 10), role: 'user', balance: 0, created_at: now(), last_login: now(), status: 'active' };
-  db.users.push(user); saveDb();
-  res.json({ token: sign(user), user: cleanUser(user) });
+  db.users.push(user);
+  const session = createLoginSession(user, req);
+  saveDb();
+  res.json({ token: sign(user, session.id), user: cleanUser(user) });
 });
 
 app.post('/api/login', (req, res) => {
@@ -398,8 +446,15 @@ app.post('/api/login', (req, res) => {
   const user = db.users.find(u => u.username === username);
   if (!user || !bcrypt.compareSync(password, user.password_hash)) return res.status(400).json({ error: 'Sai tài khoản hoặc mật khẩu' });
   if (user.status !== 'active') return res.status(403).json({ error: 'Tài khoản đã bị khóa/xóa' });
-  user.last_login = now(); saveDb();
-  res.json({ token: sign(user), user: cleanUser(user) });
+  user.last_login = now();
+  const session = createLoginSession(user, req);
+  saveDb();
+  res.json({ token: sign(user, session.id), user: cleanUser(user) });
+});
+app.post('/api/logout', auth, (req, res) => {
+  if (req.session) req.session.active = false;
+  saveDb();
+  res.json({ ok: true });
 });
 app.get('/api/me', auth, (req, res) => res.json({ user: cleanUser(req.user) }));
 
