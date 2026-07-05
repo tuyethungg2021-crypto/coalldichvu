@@ -190,7 +190,11 @@ function uploadToCloudinary(file, folder = 'coalldichvu') {
   });
 }
 
-function sign(user) { return jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, { expiresIn: '7d' }); }
+function createSessionId() { return uid('sess'); }
+function sign(user) {
+  if (!user.current_session) user.current_session = createSessionId();
+  return jwt.sign({ id: user.id, username: user.username, role: user.role, sid: user.current_session }, JWT_SECRET, { expiresIn: '7d' });
+}
 function cleanUser(u) { return u ? { id: u.id, username: u.username, role: u.role, balance: u.balance || 0, created_at: u.created_at, last_login: u.last_login, status: u.status || 'active' } : null; }
 function auth(req, res, next) {
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/, '');
@@ -199,6 +203,9 @@ function auth(req, res, next) {
     const decoded = jwt.verify(token, JWT_SECRET);
     const user = db.users.find(u => u.id === decoded.id);
     if (!user || user.status !== 'active') return res.status(401).json({ error: 'Tài khoản không hợp lệ hoặc đã bị khóa/xóa' });
+    if (!decoded.sid || user.current_session !== decoded.sid) {
+      return res.status(401).json({ error: 'Tài khoản đã được đăng nhập trên thiết bị khác. Phiên này đã bị đăng xuất.' });
+    }
     req.user = user; next();
   } catch { res.status(401).json({ error: 'Phiên đăng nhập hết hạn' }); }
 }
@@ -402,7 +409,7 @@ app.post('/api/register', (req, res) => {
   if (!/^[a-z0-9_]{3,30}$/.test(username)) return res.status(400).json({ error: 'Tên đăng nhập chỉ gồm chữ thường, số, dấu _, từ 3-30 ký tự' });
   if (password.length < 6) return res.status(400).json({ error: 'Mật khẩu tối thiểu 6 ký tự' });
   if (db.users.some(u => u.username === username)) return res.status(400).json({ error: 'Tên đăng nhập đã tồn tại' });
-  const user = { id: uid('u'), username, password_hash: bcrypt.hashSync(password, 10), role: 'user', balance: 0, created_at: now(), last_login: now(), status: 'active' };
+  const user = { id: uid('u'), username, password_hash: bcrypt.hashSync(password, 10), role: 'user', balance: 0, created_at: now(), last_login: now(), status: 'active', current_session: createSessionId() };
   db.users.push(user); saveDb();
   res.json({ token: sign(user), user: cleanUser(user) });
 });
@@ -413,6 +420,8 @@ app.post('/api/login', (req, res) => {
   const user = db.users.find(u => u.username === username);
   if (!user || !bcrypt.compareSync(password, user.password_hash)) return res.status(400).json({ error: 'Sai tài khoản hoặc mật khẩu' });
   if (user.status !== 'active') return res.status(403).json({ error: 'Tài khoản đã bị khóa/xóa' });
+  // Mỗi lần đăng nhập tạo phiên mới. Phiên cũ của tài khoản này sẽ mất hiệu lực ngay.
+  user.current_session = createSessionId();
   user.last_login = now(); saveDb();
   res.json({ token: sign(user), user: cleanUser(user) });
 });
@@ -932,8 +941,14 @@ app.patch('/api/admin/users/:id', auth, adminOnly, (req, res) => {
   const user = db.users.find(u => u.id === req.params.id); if (!user) return res.status(404).json({ error: 'Không tìm thấy user' });
   if (req.body.balance !== undefined) user.balance = Math.floor(Number(req.body.balance || 0));
   if (req.body.addBalance !== undefined) user.balance = Math.floor(Number(user.balance || 0) + Number(req.body.addBalance || 0));
-  if (req.body.password) user.password_hash = bcrypt.hashSync(String(req.body.password), 10);
-  if (req.body.status) user.status = String(req.body.status);
+  if (req.body.password) {
+    user.password_hash = bcrypt.hashSync(String(req.body.password), 10);
+    user.current_session = createSessionId(); // đổi mật khẩu thì đá toàn bộ phiên cũ
+  }
+  if (req.body.status) {
+    user.status = String(req.body.status);
+    if (user.status !== 'active') user.current_session = createSessionId();
+  }
   saveDb(); res.json(cleanUser(user));
 });
 app.delete('/api/admin/users/:id', auth, adminOnly, (req, res) => {

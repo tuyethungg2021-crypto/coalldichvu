@@ -1,0 +1,12 @@
+Đã bật giới hạn 1 tài khoản = 1 thiết bị đăng nhập đồng thời.
+
+Cơ chế:
+- Khi đăng nhập, server tạo current_session mới cho user và nhúng sid vào JWT.
+- Mỗi request có auth sẽ so sánh JWT.sid với user.current_session trong database.
+- Nếu tài khoản đăng nhập ở nơi khác, current_session đổi, token cũ bị trả 401 và frontend tự đăng xuất.
+- Đổi mật khẩu hoặc khóa tài khoản cũng làm mất hiệu lực token cũ.
+
+File đã sửa:
+- server.js
+- public/app.js
+- app.js

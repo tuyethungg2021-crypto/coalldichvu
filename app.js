@@ -24,7 +24,17 @@ async function api(path, opts={}){
   if (token) opts.headers.Authorization = 'Bearer ' + token;
   const res = await fetch(API + path, opts);
   const data = await res.json().catch(()=>({}));
-  if(!res.ok) throw new Error(data.error || 'Có lỗi xảy ra');
+  if(!res.ok){
+    const msg = data.error || 'Có lỗi xảy ra';
+    if(res.status === 401 && token && !path.includes('/api/login') && !path.includes('/api/register')){
+      token=''; localStorage.removeItem('token'); me=null;
+      stopOtpAutoPolling?.(); stopLiveDescriptionPolling?.(); stopBinancePolling?.();
+      renderAuth?.();
+      const box = document.getElementById('msg');
+      if(box) box.innerHTML = `<div class="notice err">${esc(msg)}</div>`;
+    }
+    throw new Error(msg);
+  }
   return data;
 }
 function toast(msg, ok=true){
