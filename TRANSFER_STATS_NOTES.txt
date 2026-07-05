@@ -1,0 +1,7 @@
+Đã bổ sung đầy đủ:
+- Chuyển tiền giữa user, tối thiểu 20.000đ.
+- Mặc định tất cả user bị khóa chuyển tiền: transfer_enabled=false.
+- Admin mở từng user trong Admin -> Quản lý người dùng, cột Chuyển tiền.
+- Thống kê từ 06/07/2026: tổng nạp, tổng sử dụng, tổng chuyển toàn web và theo từng user.
+- API: GET /api/stats/global, GET/POST /api/transfers, PATCH /api/admin/users/:id với transfer_enabled.
+- Đã đổi cache-buster app.js/styles.css để trình duyệt không giữ giao diện cũ.

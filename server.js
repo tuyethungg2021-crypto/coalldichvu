@@ -166,7 +166,12 @@ const staticCache = {
   etag: true,
   lastModified: true,
   setHeaders(res, filePath) {
-    if (/\.(?:js|css|png|jpg|jpeg|gif|webp|svg|ico|woff2?)$/i.test(filePath)) {
+    // app.js thay đổi thường xuyên; không cache để tránh trình duyệt giữ giao diện cũ.
+    if (/app\.js$/i.test(filePath)) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      return;
+    }
+    if (/\.(?:css|png|jpg|jpeg|gif|webp|svg|ico|woff2?)$/i.test(filePath)) {
       res.setHeader('Cache-Control', 'public, max-age=604800, must-revalidate');
     }
   }
