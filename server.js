@@ -139,6 +139,9 @@ async function migrate() {
     changed = true;
   }
   for (const u of db.users || []) {
+    // Mặc định khóa chuyển tiền cho TẤT CẢ tài khoản.
+    // Chỉ tài khoản đã được admin mở qua Quản lý người dùng mới có transfer_unlocked_at.
+    if (u.transfer_unlocked_at === undefined && u.transfer_enabled === true) { u.transfer_enabled = false; changed = true; }
     if (u.transfer_enabled === undefined) { u.transfer_enabled = false; changed = true; }
   }
   db.transfers = db.transfers || [];
@@ -204,7 +207,7 @@ function sign(user) {
   if (!user.current_session) user.current_session = createSessionId();
   return jwt.sign({ id: user.id, username: user.username, role: user.role, sid: user.current_session }, JWT_SECRET, { expiresIn: '7d' });
 }
-function cleanUser(u) { return u ? { id: u.id, username: u.username, role: u.role, balance: u.balance || 0, created_at: u.created_at, last_login: u.last_login, status: u.status || 'active', transfer_enabled: !!u.transfer_enabled } : null; }
+function cleanUser(u) { return u ? { id: u.id, username: u.username, role: u.role, balance: u.balance || 0, created_at: u.created_at, last_login: u.last_login, status: u.status || 'active', transfer_enabled: !!u.transfer_enabled, transfer_unlocked_at: u.transfer_unlocked_at || '' } : null; }
 function auth(req, res, next) {
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/, '');
   if (!token) return res.status(401).json({ error: 'Bạn chưa đăng nhập' });
@@ -1018,7 +1021,11 @@ app.patch('/api/admin/users/:id', auth, adminOnly, (req, res) => {
     user.status = String(req.body.status);
     if (user.status !== 'active') user.current_session = createSessionId();
   }
-  if (req.body.transfer_enabled !== undefined) user.transfer_enabled = !!req.body.transfer_enabled;
+  if (req.body.transfer_enabled !== undefined) {
+    user.transfer_enabled = !!req.body.transfer_enabled;
+    if (user.transfer_enabled) user.transfer_unlocked_at = user.transfer_unlocked_at || now();
+    else user.transfer_unlocked_at = '';
+  }
   saveDb(); res.json(cleanUser(user));
 });
 app.delete('/api/admin/users/:id', auth, adminOnly, (req, res) => {

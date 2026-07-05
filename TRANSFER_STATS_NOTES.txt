@@ -1,7 +1,7 @@
-Đã bổ sung đầy đủ:
-- Chuyển tiền giữa user, tối thiểu 20.000đ.
-- Mặc định tất cả user bị khóa chuyển tiền: transfer_enabled=false.
-- Admin mở từng user trong Admin -> Quản lý người dùng, cột Chuyển tiền.
-- Thống kê từ 06/07/2026: tổng nạp, tổng sử dụng, tổng chuyển toàn web và theo từng user.
-- API: GET /api/stats/global, GET/POST /api/transfers, PATCH /api/admin/users/:id với transfer_enabled.
-- Đã đổi cache-buster app.js/styles.css để trình duyệt không giữ giao diện cũ.
+Bản fix thật các chức năng chuyển tiền/thống kê:
+- POST /api/transfers: min 20.000đ, kiểm tra quyền transfer_enabled, đủ số dư, không chuyển chính mình.
+- Tất cả user mặc định bị khóa chuyển tiền. Nếu user cũ lỡ có transfer_enabled=true nhưng chưa có transfer_unlocked_at thì migration sẽ khóa lại.
+- Admin mở từng user trong Admin - Quản lý người dùng bằng cột Quyền chuyển tiền rồi bấm Lưu.
+- GET /api/admin/users trả thêm thống kê từng user từ 06/07/2026: deposits_total, used_total, transfer_sent, transfer_received.
+- GET /api/stats/global trả thống kê toàn web từ 06/07/2026.
+- Giao diện nạp tiền admin chỉ còn Binance, đã bỏ thủ công/SePay.
