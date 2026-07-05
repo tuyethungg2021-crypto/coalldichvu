@@ -902,7 +902,7 @@ app.post('/api/transfers', auth, (req, res) => withTransferLock(async () => {
 
 app.get('/api/admin/users', auth, adminOnly, (req, res) => {
   const limit = Math.min(Math.max(parseInt(req.query.limit || '300', 10) || 300, 1), 1000);
-  res.json(db.users.map(u => ({ ...cleanUser(u), ...userMoneyStats(u.id), days_inactive: daysInactive(u) })).sort((a,b) => a.role.localeCompare(b.role) || a.username.localeCompare(b.username)).slice(0, limit));
+  res.json(db.users.map(u => ({ ...cleanUser(u), ...userMoneyStats(u.id), days_inactive: daysInactive(u) })).sort((a,b) => Math.floor(Number(b.balance||0)) - Math.floor(Number(a.balance||0)) || a.username.localeCompare(b.username)).slice(0, limit));
 });
 app.patch('/api/admin/users/:id', auth, adminOnly, (req, res) => {
   const user = db.users.find(u => u.id === req.params.id); if (!user) return res.status(404).json({ error: 'Không tìm thấy user' });
