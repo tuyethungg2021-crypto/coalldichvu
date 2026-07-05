@@ -9,7 +9,6 @@ const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const { MongoClient } = require('mongodb');
 const { v2: cloudinary } = require('cloudinary');
-const { createHighlandReferralRouter } = require('./highland-referral-integration');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -52,7 +51,6 @@ function daysInactive(u) {
 
 const defaults = {
   users: [], services: [], rentals: [], deposits: [], notifications: [], dmxProducts: [], dmxOrders: [], sepayTransactions: [], binanceTransactions: [],
-  highlandReferralPurchases: [], highlandReferralRuns: [],
   settings: {
     siteName: 'Có All Dịch Vụ',
     brandText: 'Thuê sim nhanh - nhiều nhà mạng - quản lý dễ dàng',
@@ -77,30 +75,14 @@ const defaults = {
     binanceExpiryMinutes: '30',
     binanceQrImage: '',
     binanceLastPolledAt: 0,
-    binanceNextNoteId: 1,
-    highlandReferralEnabled: '0',
-    highlandReferralPrice: '0',
-    highlandReferralRemoteBaseUrl: '',
-    highlandReferralRemoteApiKey: '',
-    highlandReferralCooldownSeconds: '2',
-    highlandReferralRunTimeoutMinutes: '40'
+    binanceNextNoteId: 1
   }
 };
 let db = null;
 
 function normalizeDb(parsed) {
   parsed = parsed || {};
-  return {
-    ...defaults,
-    ...parsed,
-    dmxProducts: parsed.dmxProducts || [],
-    dmxOrders: parsed.dmxOrders || [],
-    sepayTransactions: parsed.sepayTransactions || [],
-    binanceTransactions: parsed.binanceTransactions || [],
-    highlandReferralPurchases: parsed.highlandReferralPurchases || [],
-    highlandReferralRuns: parsed.highlandReferralRuns || [],
-    settings: { ...defaults.settings, ...(parsed.settings || {}) }
-  };
+  return { ...defaults, ...parsed, dmxProducts: parsed.dmxProducts || [], dmxOrders: parsed.dmxOrders || [], sepayTransactions: parsed.sepayTransactions || [], binanceTransactions: parsed.binanceTransactions || [], settings: { ...defaults.settings, ...(parsed.settings || {}) } };
 }
 async function loadDb() {
   if (MONGODB_URI) {
@@ -190,17 +172,6 @@ function auth(req, res, next) {
   } catch { res.status(401).json({ error: 'Phiên đăng nhập hết hạn' }); }
 }
 function adminOnly(req, res, next) { if (req.user.role !== 'admin') return res.status(403).json({ error: 'Chỉ admin được dùng chức năng này' }); next(); }
-
-app.use(createHighlandReferralRouter({
-  getDb: () => db,
-  saveDb,
-  auth,
-  adminOnly,
-  uid,
-  now,
-  cleanUser
-}));
-
 function providerCfg(provider) {
   provider = String(provider || 'legacy').toLowerCase();
   if (provider === 'codesim') return {
@@ -307,16 +278,11 @@ async function processExpiredRentals() {
 }
 function safeSettingsForUser(settings, isAdmin) {
   const out = { ...settings };
-  if (!isAdmin) { delete out.apiKey; delete out.legacyApiKey; delete out.codesimApiKey; delete out.sepayWebhookApiKey; delete out.binanceApiKey; delete out.binanceApiSecret; delete out.highlandReferralRemoteApiKey; delete out.highlandReferralRemoteBaseUrl; }
+  if (!isAdmin) { delete out.apiKey; delete out.legacyApiKey; delete out.codesimApiKey; delete out.sepayWebhookApiKey; delete out.binanceApiKey; delete out.binanceApiSecret; }
   if (isAdmin && out.legacyApiKey) out.legacyApiKeyMasked = out.legacyApiKey.slice(0, 6) + '...' + out.legacyApiKey.slice(-4);
   if (isAdmin && out.codesimApiKey) out.codesimApiKeyMasked = out.codesimApiKey.slice(0, 6) + '...' + out.codesimApiKey.slice(-4);
   if (isAdmin && out.apiKey) out.apiKeyMasked = out.apiKey.slice(0, 6) + '...' + out.apiKey.slice(-4);
   if (isAdmin && out.sepayWebhookApiKey) out.sepayWebhookApiKeyMasked = out.sepayWebhookApiKey.slice(0, 6) + '...' + out.sepayWebhookApiKey.slice(-4);
-  if (isAdmin && out.highlandReferralRemoteApiKey) {
-    out.highlandReferralRemoteApiKeyMasked = out.highlandReferralRemoteApiKey.slice(0, 6) + '...' + out.highlandReferralRemoteApiKey.slice(-4);
-    out.highlandReferralRemoteApiKeyConfigured = true;
-  }
-  if (isAdmin) delete out.highlandReferralRemoteApiKey;
   if (isAdmin) {
     const effKey = (typeof getBinanceApiKey === 'function') ? getBinanceApiKey() : '';
     const effSecret = (typeof getBinanceApiSecret === 'function') ? getBinanceApiSecret() : '';
@@ -475,7 +441,105 @@ app.post('/api/rentals/:id/cancel', auth, async (req, res) => {
 
 function onlyDigits(v) { return String(v ?? '').replace(/[^0-9]/g, ''); }
 function normText(v) { return String(v ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9_]+/g, ' ').trim(); }
+function makeSepayCode(username) { return ('NAP ' + String(username || '').toLowerCase() + ' ' + Math.random().toString(36).slice(2, 7).toUpperCase()).trim(); }
+function buildSepayQr(amount, content) {
+  const bank = String(db.settings.sepayBankCode || process.env.SEPAY_BANK || 'MB').trim();
+  const account = String(db.settings.sepayAccount || process.env.SEPAY_ACCOUNT || '').trim();
+  const name = String(db.settings.sepayAccountName || process.env.SEPAY_ACCOUNT_NAME || '').trim();
+  if (!bank || !account) return '';
+  const q = new URLSearchParams();
+  if (amount) q.set('amount', String(Math.floor(Number(amount || 0))));
+  q.set('addInfo', String(content || ''));
+  if (name) q.set('accountName', name);
+  return `https://img.vietqr.io/image/${encodeURIComponent(bank)}-${encodeURIComponent(account)}-compact2.png?${q.toString()}`;
+}
+function extractSepayPayload(body) {
+  const b = body || {};
+  const amount = Math.floor(Number(b.transferAmount ?? b.amount ?? b.money ?? b.creditAmount ?? b.transactionAmount ?? b.value ?? 0));
+  const content = String(b.content ?? b.description ?? b.transferContent ?? b.transactionContent ?? b.transaction_content ?? b.memo ?? b.note ?? '');
+  const ref = String(b.id ?? b.referenceCode ?? b.reference_code ?? b.transactionId ?? b.transaction_id ?? b.gatewayTransactionId ?? b.code ?? b.transactionDate ?? '');
+  const type = String(b.transferType ?? b.type ?? b.direction ?? '').toLowerCase();
+  return { amount, content, ref, type };
+}
+function findUserBySepayContent(content) {
+  const normalized = normText(content);
+  return (db.users || []).find(u => normalized.includes(normText(u.username)));
+}
+function approveDeposit(dep, transactionRef, rawPayload) {
+  if (!dep || dep.status === 'Đã duyệt') return false;
+  const u = db.users.find(x => x.id === dep.user_id);
+  if (!u) return false;
+  u.balance = Math.floor(Number(u.balance || 0) + Number(dep.amount || 0));
+  dep.status = 'Đã duyệt';
+  dep.admin_note = 'Tự động cộng tiền qua SePay' + (transactionRef ? ` (${transactionRef})` : '');
+  dep.reviewed_at = now();
+  dep.sepay_ref = transactionRef || dep.sepay_ref || '';
+  dep.sepay_payload = rawPayload || dep.sepay_payload || null;
+  db.notifications.push({ id: uid('n'), type: 'deposit_auto', message: `Đã tự cộng ${Number(dep.amount||0).toLocaleString('vi-VN')}đ cho ${(u||{}).username || 'user'} qua SePay`, read: 0, created_at: now() });
+  return true;
+}
 
+app.post('/api/deposits/auto', auth, async (req, res) => {
+  try {
+    const amount = Math.floor(Number(req.body.amount || 0));
+    if (amount < 1000) return res.status(400).json({ error: 'Số tiền nạp tối thiểu 1.000đ' });
+    const code = makeSepayCode(req.user.username);
+    const qrUrl = buildSepayQr(amount, code);
+    const dep = { id: uid('d'), user_id: req.user.id, amount, content: code, proof_image: '', status: 'Chờ thanh toán', admin_note: 'Đang chờ SePay xác nhận', created_at: now(), reviewed_at: '', method: 'sepay', sepay_code: code, sepay_qr: qrUrl };
+    db.deposits.push(dep);
+    saveDb();
+    res.json({ deposit: dep, qrUrl, transferContent: code, bank: db.settings.sepayBankCode, account: db.settings.sepayAccount, accountName: db.settings.sepayAccountName });
+  } catch (e) { res.status(500).json({ error: e.message || 'Không tạo được lệnh nạp SePay' }); }
+});
+
+app.post('/api/sepay/webhook', async (req, res) => {
+  try {
+    const webhookKey = String(process.env.SEPAY_WEBHOOK_API_KEY || db.settings.sepayWebhookApiKey || '').trim();
+    const authHeader = String(req.headers['authorization'] || '').trim();
+    const providedKey = authHeader.replace(/^Apikey\s+/i, '').trim();
+
+    if (!webhookKey) {
+      console.warn('SEPAY WEBHOOK: No API key configured — rejecting request for security');
+      return res.status(401).json({ success: false, error: 'Webhook not configured' });
+    }
+    if (providedKey !== webhookKey) {
+      console.warn('SEPAY WEBHOOK: Invalid API key');
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+
+    db.sepayTransactions = db.sepayTransactions || [];
+    const payload = req.body || {};
+    console.log('SEPAY WEBHOOK RECEIVED:', JSON.stringify(payload).slice(0, 1500));
+    const { amount, content, ref, type } = extractSepayPayload(payload);
+    if (type && type.includes('out')) return res.json({ success: true, ignored: 'outgoing' });
+    if (!amount || amount <= 0 || !Number.isInteger(amount)) return res.json({ success: true, ignored: 'invalid_payload' });
+    if (!content || !String(content).trim()) return res.json({ success: true, ignored: 'invalid_payload' });
+    const txKey = ref || `${amount}:${content}:${JSON.stringify(payload).slice(0,200)}`;
+    if (db.sepayTransactions.some(t => t.key === txKey)) return res.json({ success: true, duplicate: true });
+
+    const normalized = normText(content);
+    let dep = (db.deposits || [])
+      .filter(d => ['Chờ thanh toán','Chờ duyệt'].includes(String(d.status || '')) && Math.floor(Number(d.amount || 0)) === amount)
+      .find(d => d.sepay_code && normalized.includes(normText(d.sepay_code)));
+
+    if (!dep) {
+      const user = findUserBySepayContent(content);
+      if (user) {
+        dep = (db.deposits || [])
+          .filter(d => ['Chờ thanh toán','Chờ duyệt'].includes(String(d.status || '')) && d.user_id === user.id && Math.floor(Number(d.amount || 0)) === amount)
+          .sort((a,b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
+      }
+    }
+
+    const credited = approveDeposit(dep, txKey, payload);
+    db.sepayTransactions.push({ key: txKey, amount, content, credited, deposit_id: dep ? dep.id : '', created_at: now(), payload });
+    saveDb();
+    return res.json({ success: true, credited, deposit_id: dep ? dep.id : null });
+  } catch (e) {
+    console.error('SEPAY WEBHOOK ERROR:', e);
+    return res.status(200).json({ success: false, error: e.message || 'Webhook error' });
+  }
+});
 
 // ---------- Binance Pay deposit ----------
 function getBinanceConfig() {
@@ -753,7 +817,63 @@ app.patch('/api/admin/services/:id', auth, adminOnly, (req, res) => {
 });
 app.delete('/api/admin/services/:id', auth, adminOnly, (req, res) => { db.services = db.services.filter(s => s.id !== req.params.id); saveDb(); res.json({ ok: true }); });
 
+function vnDateKey(value) {
+  const d = value ? new Date(value) : new Date();
+  if (Number.isNaN(d.getTime())) return '';
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+}
+function isRentalSuccess(r) {
+  const st = String(r.status || '').toLowerCase();
+  return !r.refunded && (!!r.otp_code || st.includes('đã nhận code') || st.includes('da nhan code') || st.includes('thành công') || st.includes('thanh cong'));
+}
+function isRentalExpired(r) {
+  const st = String(r.status || '').toLowerCase();
+  const note = String(r.note || '').toLowerCase();
+  return !!r.refunded || st.includes('hết hạn') || st.includes('het han') || st.includes('hoàn tiền') || st.includes('hoan tien') || note.includes('hết thời gian') || note.includes('het thoi gian');
+}
+function buildAdminDailyStats(dateKey) {
+  const target = dateKey || vnDateKey(new Date());
+  const rentals = (db.rentals || []).filter(r => vnDateKey(r.rented_at || r.created_at) === target);
+  const rentalServices = {};
+  for (const r of rentals) {
+    const name = String(r.service_name || 'Không rõ dịch vụ');
+    if (!rentalServices[name]) rentalServices[name] = { service_name: name, price: Number(r.price || 0), total: 0, success: 0, expired: 0, other: 0, revenue: 0 };
+    const row = rentalServices[name];
+    row.total += 1;
+    row.price = Number(r.price || row.price || 0);
+    if (isRentalSuccess(r)) { row.success += 1; row.revenue += Number(r.price || 0); }
+    else if (isRentalExpired(r)) row.expired += 1;
+    else row.other += 1;
+  }
+  const rentalRows = Object.values(rentalServices).sort((a,b) => b.revenue - a.revenue || b.success - a.success || a.service_name.localeCompare(b.service_name));
+  const rentalRevenue = rentalRows.reduce((sum, x) => sum + Number(x.revenue || 0), 0);
+  const rentalTotal = rentalRows.reduce((sum, x) => sum + Number(x.total || 0), 0);
+  const rentalSuccess = rentalRows.reduce((sum, x) => sum + Number(x.success || 0), 0);
+  const rentalExpired = rentalRows.reduce((sum, x) => sum + Number(x.expired || 0), 0);
+
+  const dmxOrders = (db.dmxOrders || []).filter(o => vnDateKey(o.created_at) === target);
+  const dmxProducts = {};
+  for (const o of dmxOrders) {
+    const name = String(o.product_name || 'Không rõ sản phẩm');
+    if (!dmxProducts[name]) dmxProducts[name] = { product_name: name, quantity: 0, orders: 0, revenue: 0 };
+    dmxProducts[name].orders += 1;
+    dmxProducts[name].quantity += Number(o.quantity || 0);
+    dmxProducts[name].revenue += Number(o.total || 0);
+  }
+  const dmxRows = Object.values(dmxProducts).sort((a,b) => b.revenue - a.revenue || b.quantity - a.quantity || a.product_name.localeCompare(b.product_name));
+  const dmxRevenue = dmxRows.reduce((sum, x) => sum + Number(x.revenue || 0), 0);
+  const dmxTotalOrders = dmxRows.reduce((sum, x) => sum + Number(x.orders || 0), 0);
+  const dmxTotalQuantity = dmxRows.reduce((sum, x) => sum + Number(x.quantity || 0), 0);
+
+  return {
+    date: target,
+    revenue: rentalRevenue + dmxRevenue,
+    rentals: { total: rentalTotal, success: rentalSuccess, expired: rentalExpired, revenue: rentalRevenue, services: rentalRows },
+    dmx: { orders: dmxTotalOrders, quantity: dmxTotalQuantity, revenue: dmxRevenue, products: dmxRows }
+  };
+}
 app.get('/api/admin/rentals', auth, adminOnly, async (req, res) => { await processExpiredRentals(); res.json(db.rentals.map(r => ({ ...r, username: (db.users.find(u => u.id === r.user_id) || {}).username || 'unknown' })).sort((a,b) => b.rented_at.localeCompare(a.rented_at))); });
+app.get('/api/admin/rentals/stats', auth, adminOnly, async (req, res) => { await processExpiredRentals(); res.json(buildAdminDailyStats(String(req.query.date || '').trim())); });
 app.patch('/api/admin/rentals/:id', auth, adminOnly, (req, res) => {
   const r = db.rentals.find(x => x.id === req.params.id); if (!r) return res.status(404).json({ error: 'Không tìm thấy lượt thuê' });
   ['status','otp_code','note','ended_at'].forEach(k => { if (req.body[k] !== undefined) r[k] = String(req.body[k]); }); saveDb(); res.json(r);

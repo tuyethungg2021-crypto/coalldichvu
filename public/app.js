@@ -12,12 +12,6 @@ let descPollBusy = false;
 let binancePollTimer = null;
 let binancePollBusy = false;
 let binanceCountdownTimer = null;
-let highlandPollTimer = null;
-let highlandPollBusy = false;
-let highlandSubmitBusy = false;
-let highlandHistoryBusy = false;
-let highlandAdminSyncBusy = false;
-let highlandAdminRows = [];
 
 const $ = s => document.querySelector(s);
 const app = $('#app');
@@ -29,10 +23,8 @@ async function api(path, opts={}){
   if (!(opts.body instanceof FormData)) opts.headers['Content-Type'] = 'application/json';
   if (token) opts.headers.Authorization = 'Bearer ' + token;
   const res = await fetch(API + path, opts);
-  const text = await res.text();
-  let data = {};
-  try{ data = text ? JSON.parse(text) : {}; }catch{ data = {}; }
-  if(!res.ok) throw new Error(data.error || text.slice(0,160) || `Có lỗi xảy ra (${res.status})`);
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data.error || 'Có lỗi xảy ra');
   return data;
 }
 function toast(msg, ok=true){
@@ -71,11 +63,11 @@ async function loadSettings(){ settings = await api('/api/settings'); document.d
 async function loadMe(){ if(!token) return; try{ const d = await api('/api/me'); me = d.user; }catch(e){ token=''; localStorage.removeItem('token'); me=null; } }
 async function boot(){ await loadSettings(); await loadMe(); if(!me) renderAuth(); else await loadPage(); }
 function header(){
-  return `<div class="top"><div class="wrap topin"><div class="brand">${settings.logoUrl?`<img class="logo" src="${esc(settings.logoUrl)}">`:`<div class="logo"></div>`}<div><h1>${esc(settings.siteName||'Có All Dịch Vụ')}</h1><p>${esc(settings.brandText||'')}</p></div></div><div class="userbar"><span class="pill">${esc(me.username)} ${me.role==='admin'?'• Admin':''}</span><span class="pill">Số dư: <b>${fmt(me.balance)}</b></span><button class="secondary" onclick="logout()">Đăng xuất</button></div></div></div>`;
+  return `<div class="top"><div class="wrap topin"><div class="brand">${settings.logoUrl?`<img class="logo" src="${esc(settings.logoUrl)}">`:`<div class="logo"></div>`}<div><h1>${esc(settings.siteName||'Có All Dịch Vụ')}</h1><p>${esc(settings.brandText||'')}</p></div></div><div class="userbar"><span class="pill">${esc(me.username)} ${me.role==='admin'?'• Admin':''}</span><span class="pill balance-pill">Số dư: <b>${fmt(me.balance)}</b></span><button class="secondary" onclick="logout()">Đăng xuất</button></div></div></div>`;
 }
 function menu(){
-  const common = [['services','Dịch vụ'],['dmx','Dịch Vụ DMX'],['highland_referral','Highlands Coffee'],['history','Lịch sử'],['deposit','Nạp tiền']];
-  const admin = [['admin_services','Dịch vụ admin'],['admin_dmx','Quản lý DMX'],['admin_highland_referral','Quản trị Highlands Coffee'],['admin_api','API thuê sim'],['admin_history','Lịch sử admin'],['admin_deposit_info','Nạp tiền admin'],['admin_users','Quản lý người dùng'],['admin_web','Quản lý web'],['admin_approve','Duyệt nạp tiền']];
+  const common = [['services','Dịch vụ'],['dmx','Dịch Vụ DMX'],['history','Lịch sử'],['deposit','Nạp tiền']];
+  const admin = [['admin_services','Dịch vụ admin'],['admin_dmx','Quản lý DMX'],['admin_api','API thuê sim'],['admin_history','Lịch sử admin'],['admin_deposit_info','Nạp tiền admin'],['admin_users','Quản lý người dùng'],['admin_web','Quản lý web'],['admin_approve','Duyệt nạp tiền']];
   const items = me.role==='admin' ? common.concat(admin) : common;
   return `<div class="side">${items.map(i=>`<button class="tab ${tab===i[0]?'active':''}" onclick="setTab('${i[0]}')">${i[1]}${i[0]==='admin_approve'&&notifications.filter(n=>!n.read).length?` (${notifications.filter(n=>!n.read).length})`:''}</button>`).join('')}</div>`;
 }
@@ -84,13 +76,12 @@ async function loadPage(){
   if(me?.role==='admin') notifications = await api('/api/admin/notifications').catch(()=>[]);
   app.innerHTML = header()+`<div class="wrap grid">${menu()}<div class="main"></div></div>`;
   if(settings.adUrl) $('.main').insertAdjacentHTML('beforeend', `<img class="ad" src="${esc(settings.adUrl)}">`);
-  stopHighlandReferralPolling();
   await renderTab();
   startOtpAutoPolling();
   startLiveDescriptionPolling();
 }
 async function setTab(t){ tab=t; await loadPage(); }
-function logout(){ stopOtpAutoPolling(); stopLiveDescriptionPolling(); stopBinancePolling(); stopHighlandReferralPolling(); localStorage.removeItem('token'); token=''; me=null; renderAuth(); }
+function logout(){ stopOtpAutoPolling(); stopLiveDescriptionPolling(); stopBinancePolling(); localStorage.removeItem('token'); token=''; me=null; renderAuth(); }
 function renderAuth(){
   app.innerHTML = `<div class="wrap auth card"><h2>${esc(settings.siteName||'Có All Dịch Vụ')}</h2><div id="msg"></div><div class="field"><label>Tài khoản</label><input id="username" placeholder="Nhập tài khoản"></div><div class="field"><label>Mật khẩu</label><input id="password" type="password" placeholder="Nhập mật khẩu"></div><div class="flex"><button onclick="login()">Đăng nhập</button><button class="secondary" onclick="register()">Đăng ký user</button></div></div>`;
 }
@@ -99,12 +90,10 @@ async function register(){ try{ const d=await api('/api/register',{method:'POST'
 async function renderTab(){
   if(tab==='services') return userServices();
   if(tab==='dmx') return userDmx();
-  if(tab==='highland_referral') return userHighlandReferral();
   if(tab==='history') return userHistory();
   if(tab==='deposit') return userDeposit();
   if(tab==='admin_services') return adminServices();
   if(tab==='admin_dmx') return adminDmx();
-  if(tab==='admin_highland_referral') return adminHighlandReferral();
   if(tab==='admin_api') return adminApi();
   if(tab==='admin_history') return adminHistory();
   if(tab==='admin_deposit_info') return adminDepositInfo();
@@ -114,7 +103,7 @@ async function renderTab(){
 }
 async function userServices(){
   services = await api('/api/services');
-  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Dịch vụ thuê sim</h2><div class="servicegrid">${services.map(s=>`<div class="svc">${s.imageUrl?`<img class="svc-img" src="${esc(s.imageUrl)}">`:''}<h3>${esc(s.name)}</h3><div class="desc-box"><p id="svc_desc_${s.id}" class="muted live-desc">${esc(s.description||'')}</p><button class="small secondary copy-desc-btn" onclick="copyElementText('svc_desc_${s.id}','mô tả')">Copy mô tả</button></div><div class="field"><label>Nhà mạng</label><select id="carrier_${s.id}">${carrierOptions(s.network)}</select></div><div class="price">${fmt(s.price)}</div><button onclick="rent('${s.id}')">Thuê sim</button></div>`).join('')}</div></div><div class="card"><h2>Sim đang thuê</h2><div id="activeRentals"></div></div><div class="card"><h2>Lịch sử thuê sim</h2><p class="muted">Số thuê mới nhất nằm trên cùng, số thuê cũ hơn nằm bên dưới.</p><div id="serviceRentalHistory"></div></div>`);
+  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Dịch vụ thuê sim</h2><div class="servicegrid">${services.map(s=>`<div class="svc">${s.imageUrl?`<img class="svc-img" src="${esc(s.imageUrl)}">`:''}<h3>${esc(s.name)}</h3>${s.description?`<p id="svc_desc_${s.id}" class="muted live-desc">${esc(s.description)}</p>`:`<p id="svc_desc_${s.id}" class="muted live-desc hidden-desc"></p>`}<div class="field"><label>Nhà mạng</label><select id="carrier_${s.id}">${carrierOptions(s.network)}</select></div><div class="price">${fmt(s.price)}</div><button onclick="rent('${s.id}')">Thuê sim</button></div>`).join('')}</div></div><div class="card"><h2>Sim đang thuê</h2><div id="activeRentals"></div></div><div class="card"><h2>Lịch sử thuê sim</h2><p class="muted">Số thuê mới nhất nằm trên cùng, số thuê cũ hơn nằm bên dưới.</p><div id="serviceRentalHistory"></div></div>`);
   rentals = await api('/api/rentals');
   $('#activeRentals').innerHTML = tableRentals(sortRentalsNewest(rentals.filter(isActiveRental)));
   $('#serviceRentalHistory').innerHTML = tableRentals(sortRentalsNewest(rentals.filter(showInHistoryRental)));
@@ -234,213 +223,11 @@ async function deleteDmxProduct(id){ if(!confirm('Xóa sản phẩm DMX này?'))
 async function adminDmxOrders(){ const d=await api('/api/admin/dmx/orders'); const rows=d.rows||[]; $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Admin - Đơn hàng DMX</h2><div class="stats"><span class="pill">Tổng đơn: <b>${d.stats?.totalOrders||0}</b></span><span class="pill">Doanh thu: <b>${fmt(d.stats?.revenue||0)}</b></span></div><div class="row"><div class="field"><label>Tìm đơn theo user/sản phẩm</label><input id="dmxOrderSearch" oninput="renderAdminDmxOrders()" placeholder="username, sản phẩm, phân loại"></div><div class="field"><label>Lọc theo ngày</label><input id="dmxOrderDate" type="date" onchange="renderAdminDmxOrders()"></div></div><div id="dmxOrderTable"></div></div>`); window._adminDmxOrders=rows; renderAdminDmxOrders(); }
 function renderAdminDmxOrders(){ const rows=window._adminDmxOrders||[]; const q=($('#dmxOrderSearch')?.value||'').toLowerCase().trim(); const day=$('#dmxOrderDate')?.value||''; const filtered=rows.filter(o=>(!q||[o.username,o.product_name,o.category].join(' ').toLowerCase().includes(q))&&(!day||String(o.created_at||'').slice(0,10)===day)); $('#dmxOrderTable').innerHTML=tableDmxOrders(filtered,true); }
 
-function stopHighlandReferralPolling(){ if(highlandPollTimer){ clearInterval(highlandPollTimer); highlandPollTimer=null; } highlandPollBusy=false; }
-function highlandIsDoneStatus(s){ return ['done','failed','timeout','cancelled'].includes(String(s||'')); }
-function highlandStatusText(s){
-  const map={creating_remote_job:'Đang tạo lượt',queued:'Đang chờ',running:'Đang chạy',done:'Hoàn tất',failed:'Thất bại',timeout:'Quá hạn',cancelled:'Đã hủy'};
-  return map[String(s||'')] || String(s||'');
-}
-function highlandEffectiveStatus(r){
-  const status=String(r?.status||'');
-  const remoteStatus=String(r?.remoteStatus||'');
-  const target=Math.max(1,Number(r?.targetSuccessCount||1));
-  if(status==='done'||remoteStatus==='done'||Number(r?.successCount||0)>=target) return 'done';
-  return status;
-}
-function highlandMessageText(msg){
-  const map={done:'Hoàn tất','Remote job đã được tạo':'Đã tạo lượt xử lý từ xa','Đang tạo remote job':'Đang tạo lượt xử lý từ xa','Remote job không hoàn thành':'Lượt xử lý từ xa không hoàn thành'};
-  return map[String(msg||'')] || String(msg||'');
-}
-function highlandStatusBadge(r){ const v=typeof r==='string'?String(r||''):highlandEffectiveStatus(r); const cls=v==='done'?'status-ok':(['failed','timeout','cancelled'].includes(v)?'status-no':'status-wait'); return `<span class="badge ${cls}">${esc(highlandStatusText(v))}</span>`; }
-function highlandProgressText(r){ return highlandEffectiveStatus(r)==='done' ? 'Thành công' : 'Đang xử lý'; }
-function highlandReferralCodeCache(){
-  try{ return JSON.parse(localStorage.getItem('highlandReferralCodes')||'{}')||{}; }catch{ return {}; }
-}
-function saveHighlandReferralCode(runId, referralCode){
-  if(!runId||!referralCode) return;
-  const cache=highlandReferralCodeCache();
-  cache[String(runId)]=String(referralCode);
-  localStorage.setItem('highlandReferralCodes', JSON.stringify(cache));
-}
-function visibleHighlandReferralCode(r){
-  return String(r.referralCode||highlandReferralCodeCache()[String(r.id||'')]||'');
-}
-function canRetryHighlandRun(r){ const s=highlandEffectiveStatus(r); return s && s!=='done' && highlandIsDoneStatus(s); }
-function tableHighlandRuns(rows, showActions=true){ if(!rows||!rows.length) return '<p class="muted">Chưa có lịch sử Highlands Coffee.</p>'; return `<div class="tablewrap"><table class="table"><tr><th>Mã giới thiệu</th><th>Trạng thái</th><th>Tiến độ</th><th>Thời gian</th>${showActions?'<th>Thao tác</th>':''}</tr>${rows.map(r=>{ const code=visibleHighlandReferralCode(r); return `<tr><td><code>${esc(code)}</code></td><td>${highlandStatusBadge(r)}</td><td>${esc(highlandProgressText(r))}</td><td>${date(r.created_at)}</td>${showActions?`<td>${canRetryHighlandRun(r)?`<button class="small secondary" onclick="retryHighlandReferral('${esc(code)}')">Yêu cầu lại</button>`:''}</td>`:''}</tr>`; }).join('')}</table></div>`; }
-function highlandActiveRuns(d){ return Array.isArray(d.activeRuns) ? d.activeRuns : (d.activeRun ? [d.activeRun] : []); }
-async function userHighlandReferral(){
-  const d=await api('/api/highland-referral/status');
-  const s=d.settings||{};
-  me=d.user||me;
-  const activeRuns=highlandActiveRuns(d);
-  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Highlands Coffee</h2><div id="highlandStatusBox">${renderHighlandUserBox(d)}</div></div><div class="card"><h2>Lịch sử Highlands Coffee</h2><div id="highlandRunHistory"><p class="muted">Đang tải lịch sử...</p></div></div>`);
-  setTimeout(()=>loadHighlandRunHistory(),0);
-  if(s.enabled && activeRuns.length) startHighlandReferralPolling();
-}
-function renderHighlandUserBox(d){
-  const s=d.settings||{};
-  const activeRuns=highlandActiveRuns(d);
-  if(!s.enabled) return '<p class="notice err">Dịch vụ Highlands Coffee đang tắt.</p>';
-  const maxActive=Number(d.maxActiveRuns||5);
-  const queueFull=activeRuns.length>=maxActive;
-  const runBox = activeRuns.length ? `<div class="notice okbox"><b>Hàng chờ:</b> ${activeRuns.length}/${maxActive} lượt<br>${activeRuns.map(r=>`${highlandStatusBadge(r)} <code>${esc(visibleHighlandReferralCode(r))}</code> - ${esc(highlandProgressText(r))}`).join('<br>')}</div>` : '';
-  return `<div class="stats"><span class="pill">Giá: <b>${fmt(s.price)}</b>/lượt</span><span class="pill">Lượt còn: <b>${Number(d.credits||0)}</b></span><span class="pill">Hàng chờ: <b>${activeRuns.length}/${maxActive}</b></span><span class="pill">Số dư: <b>${fmt(me?.balance||0)}</b></span></div>${runBox}<div class="field"><label>Mã giới thiệu Highlands Coffee</label><input id="highlandReferralCode" placeholder="Nhập mã giới thiệu" ${queueFull?'disabled':''}></div><button id="highlandSubmitBtn" ${queueFull?'disabled':''} onclick="submitHighlandReferral()">${queueFull?'Hàng chờ đã đầy':'Thêm vào hàng chờ'}</button>`;
-}
-async function refreshHighlandReferralBox(){
-  const d=await api('/api/highland-referral/status');
-  me=d.user||me;
-  if($('#highlandStatusBox')) $('#highlandStatusBox').innerHTML=renderHighlandUserBox(d);
-  if(highlandActiveRuns(d).length) startHighlandReferralPolling(); else stopHighlandReferralPolling();
-}
-async function loadHighlandRunHistory(){
-  if(highlandHistoryBusy || !$('#highlandRunHistory')) return;
-  highlandHistoryBusy=true;
-  try{
-    const d=await api('/api/highland-referral/history');
-    me=d.user||me;
-    if($('#highlandRunHistory')) $('#highlandRunHistory').innerHTML=tableHighlandRuns(d.runs||[]);
-  }catch(e){
-    if($('#highlandRunHistory')) $('#highlandRunHistory').innerHTML=`<p class="muted">${esc(e.message||'Không tải được lịch sử Highlands Coffee')}</p>`;
-  }finally{
-    highlandHistoryBusy=false;
-  }
-}
-async function submitHighlandReferral(){
-  if(highlandSubmitBusy) return;
-  const referralCode=String($('#highlandReferralCode')?.value||'').trim();
-  if(!/^[A-Za-z0-9_-]{4,64}$/.test(referralCode)){ toast('Mã giới thiệu không hợp lệ', false); return; }
-  const btn=$('#highlandSubmitBtn');
-  highlandSubmitBusy=true;
-  if(btn){ btn.disabled=true; btn.textContent='Đang xử lý...'; }
-  try{
-    await queueHighlandReferral(referralCode);
-  }catch(e){
-    toast(e.message,false);
-    highlandSubmitBusy=false;
-    if(btn){ btn.disabled=false; btn.textContent='Thêm vào hàng chờ'; }
-  }
-}
-async function queueHighlandReferral(referralCode){
-  const status=await api('/api/highland-referral/status');
-  const activeRuns=highlandActiveRuns(status);
-  const maxActive=Number(status.maxActiveRuns||5);
-  if(activeRuns.length>=maxActive) throw new Error(`Bạn chỉ được có tối đa ${maxActive} lượt Highlands Coffee đang chờ/chạy`);
-  if(Number(status.credits||0)<=0){
-    const purchased=await api('/api/highland-referral/purchase',{method:'POST',body:JSON.stringify({quantity:1})});
-    me=purchased.user||me;
-    toast('Đã mua 1 lượt Highlands Coffee');
-  }
-  await runHighlandReferral(referralCode);
-}
-async function retryHighlandReferral(referralCode){
-  if(highlandSubmitBusy) return;
-  referralCode=String(referralCode||'').trim();
-  if(!/^[A-Za-z0-9_-]{4,64}$/.test(referralCode)){ toast('Mã giới thiệu không hợp lệ', false); return; }
-  highlandSubmitBusy=true;
-  try{ await queueHighlandReferral(referralCode); }
-  catch(e){ toast(e.message,false); highlandSubmitBusy=false; await refreshHighlandReferralBox(); }
-}
-async function runHighlandReferral(referralCodeInput){
-  const referralCode=String(referralCodeInput!==undefined ? referralCodeInput : ($('#highlandReferralCode')?.value||'')).trim();
-  if(!/^[A-Za-z0-9_-]{4,64}$/.test(referralCode)){ toast('Mã giới thiệu không hợp lệ', false); return; }
-  try{
-    const d=await api('/api/highland-referral/run',{method:'POST',body:JSON.stringify({referralCode})});
-    me=d.user||me;
-    saveHighlandReferralCode(d.run?.id, referralCode);
-    if(d.run) d.run.referralCode=referralCode;
-    if(['failed','timeout','cancelled'].includes(String(d.run?.status||''))){
-      toast(d.run.safeError || 'Không tạo được lượt xử lý Highlands Coffee', false);
-      highlandSubmitBusy=false;
-      await refreshHighlandReferralBox();
-      return;
-    }
-    toast('Đã thêm vào hàng chờ Highlands Coffee');
-    highlandSubmitBusy=false;
-    await refreshHighlandReferralBox();
-    startHighlandReferralPolling(d.run.id);
-  }catch(e){ const btn=$('#highlandSubmitBtn'); highlandSubmitBusy=false; if(btn){ btn.disabled=false; btn.textContent='Thêm vào hàng chờ'; } toast(e.message,false); }
-}
-function startHighlandReferralPolling(runId){
-  if(highlandPollTimer) return;
-  highlandPollTimer=setInterval(()=>pollHighlandRunOnce(),6000);
-  setTimeout(()=>pollHighlandRunOnce(),1000);
-}
-async function pollHighlandRunOnce(runId){
-  if(highlandPollBusy) return;
-  highlandPollBusy=true;
-  try{
-    const d=await api('/api/highland-referral/status');
-    me=d.user||me;
-    if($('#highlandStatusBox')) $('#highlandStatusBox').innerHTML=renderHighlandUserBox(d);
-    if(!highlandActiveRuns(d).length){
-      stopHighlandReferralPolling();
-      highlandSubmitBusy=false;
-      await loadMe();
-      loadHighlandRunHistory();
-    }
-  }catch(e){
-    toast(e.message,false);
-  }finally{ highlandPollBusy=false; }
-}
-async function adminHighlandReferral(){
-  const d=await api('/api/admin/highland-referral/settings');
-  const s=d.settings||{};
-  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Quản trị Highlands Coffee</h2><div class="row3"><div class="field"><label>Bật dịch vụ</label><select id="hrEnabled"><option value="0">Tắt</option><option value="1" ${s.enabled?'selected':''}>Bật</option></select></div><div class="field"><label>Giá / lượt</label><input id="hrPrice" type="number" min="0" value="${esc(s.price||0)}"></div><div class="field"><label>Thời gian chờ giữa 2 lượt (giây)</label><input id="hrCooldown" type="number" min="0" max="86400" value="${esc(s.cooldownSeconds||2)}"></div></div><div class="row"><div class="field"><label>Thời gian quá hạn xử lý (phút)</label><input id="hrTimeout" type="number" min="1" max="240" value="${esc(s.timeoutMinutes||40)}"></div><div class="field"><label>Địa chỉ API từ xa</label><input id="hrRemoteUrl" value="${esc(s.remoteBaseUrl||'')}" placeholder="https://dia-chi-dich-vu-cua-ban.example"></div></div><div class="field"><label>Khóa API từ xa mới</label><input id="hrRemoteKey" type="password" placeholder="${esc(s.remoteApiKeyMasked||'Để trống nếu không đổi')}"></div><p class="muted">Khóa API hiện tại: ${esc(s.remoteApiKeyMasked||'Chưa cài')}</p><div class="flex"><button onclick="saveHighlandAdminSettings()">Lưu cấu hình</button><button class="secondary" onclick="testHighlandRemote()">Kiểm tra kết nối</button><button class="secondary" onclick="loadAdminHighlandRuns()">Tải lịch sử</button><button class="secondary" onclick="syncAdminHighlandRuns()">Đồng bộ trạng thái</button></div><div id="hrAdminResult" class="notice" style="white-space:pre-wrap;margin-top:12px"></div></div><div class="card"><h2>Lịch sử Highlands Coffee</h2><div id="hrAdminRuns"><p class="muted">Bấm tải lịch sử để xem.</p></div></div>`);
-}
-async function saveHighlandAdminSettings(){
-  const payload={
-    highlandReferralEnabled: $('#hrEnabled').value,
-    highlandReferralPrice: $('#hrPrice').value,
-    highlandReferralCooldownSeconds: $('#hrCooldown').value,
-    highlandReferralRunTimeoutMinutes: $('#hrTimeout').value,
-    highlandReferralRemoteBaseUrl: $('#hrRemoteUrl').value
-  };
-  if($('#hrRemoteKey').value) payload.highlandReferralRemoteApiKey=$('#hrRemoteKey').value;
-  try{ await api('/api/admin/highland-referral/settings',{method:'PATCH',body:JSON.stringify(payload)}); toast('Đã lưu cấu hình Highlands Coffee'); await loadSettings(); await loadPage(); }catch(e){ toast(e.message,false); }
-}
-async function testHighlandRemote(){
-  const box=$('#hrAdminResult'); if(box) box.textContent='Đang kiểm tra...';
-  try{
-    const d=await api('/api/admin/highland-referral/health');
-    if(box) box.textContent=d.ok ? `Kết nối thành công\nMã phản hồi: ${d.status}\nSẵn sàng: ${d.data?.ready?'Có':'Không'}\nCơ sở dữ liệu: ${d.data?.db||'Không rõ'}\nPhiên bản: ${d.data?.version||'Không rõ'}` : `Kết nối lỗi\nMã phản hồi: ${d.status||'Không rõ'}\n${d.error||''}`;
-    toast(d.ok?'Kết nối API từ xa thành công':'API từ xa bị lỗi',!!d.ok);
-  }catch(e){ if(box) box.textContent=e.message; toast(e.message,false); }
-}
-async function loadAdminHighlandRuns(){
-  const box=$('#hrAdminRuns'); if(box) box.innerHTML='<p class="muted">Đang tải...</p>';
-  try{ const rows=await api('/api/admin/highland-referral/runs'); highlandAdminRows=rows||[]; if(box) box.innerHTML=tableHighlandRuns(highlandAdminRows, false); }catch(e){ if(box) box.innerHTML='<p class="notice err">'+esc(e.message)+'</p>'; }
-}
-async function syncAdminHighlandRuns(){
-  if(highlandAdminSyncBusy) return;
-  highlandAdminSyncBusy=true;
-  const result=$('#hrAdminResult');
-  const box=$('#hrAdminRuns');
-  let total=0;
-  try{
-    if(!highlandAdminRows.length) highlandAdminRows=await api('/api/admin/highland-referral/runs');
-    const ids=(highlandAdminRows||[]).filter(r=>r.remoteJobId).map(r=>r.id);
-    if(result) result.textContent='Đang đồng bộ trạng thái Highlands Coffee...';
-    for(let i=0;i<ids.length;i+=2){
-      const d=await api('/api/admin/highland-referral/runs/sync-batch',{method:'POST',body:JSON.stringify({ids:ids.slice(i,i+2)})});
-      total+=Number(d.synced||0);
-      highlandAdminRows=d.rows||highlandAdminRows;
-      if(box) box.innerHTML=tableHighlandRuns(highlandAdminRows, false);
-      if(result) result.textContent=`Đã đồng bộ ${total}/${ids.length} lượt`;
-    }
-    toast('Đã đồng bộ trạng thái Highlands Coffee');
-  }catch(e){
-    if(result) result.textContent=e.message;
-    toast(e.message,false);
-  }finally{
-    highlandAdminSyncBusy=false;
-  }
-}
-
 async function userDeposit(){
   stopBinancePolling();
   deposits=await api('/api/deposits');
   const binanceCard = settings.binanceEnabled === '1' ? `<div class="card"><h2>Nạp tiền qua Binance Pay (USDT)</h2><p class="muted">Nhập số VND, hệ thống quy đổi sang USDT theo rate hiện tại. Bạn chuyển USDT qua Binance Pay với đúng nội dung và số USDT, hệ thống sẽ tự cộng tiền sau vài phút.</p><div class="row"><div class="field"><label>Số tiền VND muốn nạp</label><input id="binAmountVnd" type="number" min="1000" step="1000" placeholder="VD: 260000" oninput="renderBinancePreview()"></div><div class="field"><label>Tỉ giá USDT/VND</label><input disabled value="${esc(settings.binanceUsdtVndRate||'')}"></div></div><p class="muted" id="binPreview">Tương đương: 0 USDT</p><p class="muted">Tối thiểu: ${esc(settings.binanceMinUsdt||'1')} USDT - Tối đa: ${esc(settings.binanceMaxUsdt||'10000')} USDT${settings.binancePayeeName?` - Người nhận: <b>${esc(settings.binancePayeeName)}</b>`:''}</p><button onclick="createBinanceDeposit()">Tạo lệnh nạp Binance</button><div id="binanceBox"></div></div>` : '';
- $('.main').insertAdjacentHTML('beforeend', `${binanceCard}<div class="card"><h2>Lịch sử nạp</h2>${tableDeposits(deposits)}</div>`);
+  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Nạp tiền tự động SePay</h2><p class="muted">Nhập số tiền, tạo QR, chuyển khoản đúng số tiền và đúng nội dung. Hệ thống sẽ tự cộng tiền khi SePay gửi webhook.</p><div class="row"><div class="field"><label>Số tiền muốn nạp</label><input id="autoDepAmount" type="number" min="1000" step="1000" placeholder="VD: 50000"></div><div class="field"><label>Ngân hàng nhận</label><input disabled value="${esc(settings.sepayBankCode||'MB')} - ${esc(settings.sepayAccount||'')}"></div></div><button onclick="createSepayDeposit()">Tạo QR nạp tự động</button><div id="sepayBox"></div></div>${binanceCard}<div class="card"><h2>Nạp thủ công / dự phòng</h2><div class="row"><div><div class="notice">${esc(settings.depositInfo||'')}</div>${settings.qrImage?`<img class="qr" src="${esc(settings.qrImage)}">`:''}</div><form onsubmit="sendDeposit(event)"><div class="field"><label>Số tiền đã nạp</label><input id="depAmount" type="number" min="1000" required></div><div class="field"><label>Nội dung chuyển khoản</label><input id="depContent" placeholder="VD: nap ${esc(me.username)}"></div><div class="field"><label>Ảnh bill/chứng từ</label><input id="depProof" type="file" accept="image/*"></div><button>Gửi yêu cầu nạp thủ công</button></form></div></div><div class="card"><h2>Lịch sử nạp</h2>${tableDeposits(deposits)}</div>`);
 }
 function renderBinancePreview(){
   const el = $('#binAmountVnd'); if(!el) return;
@@ -518,6 +305,15 @@ async function pollBinanceOnce(depId){
   }finally{ binancePollBusy = false; }
 }
 
+async function createSepayDeposit(){
+  const amount = Math.floor(Number($('#autoDepAmount')?.value || 0));
+  if(amount < 1000) return toast('Số tiền nạp tối thiểu 1.000đ', false);
+  try{
+    const d = await api('/api/deposits/auto',{method:'POST',body:JSON.stringify({amount})});
+    $('#sepayBox').innerHTML = `<div class="notice okbox" style="margin-top:12px"><b>Chuyển khoản đúng nội dung:</b><br><code>${esc(d.transferContent)}</code><br><b>Số tiền:</b> ${fmt(d.deposit.amount)}<br><b>Tài khoản:</b> ${esc(d.bank)} - ${esc(d.account)} - ${esc(d.accountName||'')}</div>${d.qrUrl?`<img class="qr" src="${esc(d.qrUrl)}">`:''}<p class="muted">Sau khi chuyển khoản, chờ vài giây rồi bấm tải lại lịch sử nếu số dư chưa cập nhật.</p>`;
+    await loadMe(); deposits=await api('/api/deposits');
+  }catch(e){ toast(e.message,false); }
+}
 function tableDeposits(rows){ if(!rows.length) return '<p class="muted">Chưa có yêu cầu nạp.</p>'; return `<div class="tablewrap"><table class="table"><tr><th>Số tiền</th><th>Nội dung</th><th>Trạng thái</th><th>Phương thức</th><th>Ảnh/QR</th><th>Ngày gửi</th><th>Ghi chú admin</th></tr>${rows.map(d=>`<tr><td>${fmt(d.amount)}</td><td>${esc(d.content||'')}</td><td><span class="badge ${d.status==='Đã duyệt'?'status-ok':d.status==='Từ chối'?'status-no':'status-wait'}">${esc(d.status)}</span></td><td>${esc(d.method||'thủ công')}</td><td>${d.proof_image?`<a href="${esc(d.proof_image)}" target="_blank">Xem ảnh</a>`:d.sepay_qr?`<a href="${esc(d.sepay_qr)}" target="_blank">QR</a>`:''}</td><td>${date(d.created_at)}</td><td>${esc(d.admin_note||'')}</td></tr>`).join('')}</table></div>`; }
 async function sendDeposit(e){ e.preventDefault(); const fd=new FormData(); fd.append('amount',$('#depAmount').value); fd.append('content',$('#depContent').value); if($('#depProof').files[0]) fd.append('proof',$('#depProof').files[0]); try{ await api('/api/deposits',{method:'POST',body:fd}); toast('Đã gửi yêu cầu nạp tiền, chờ admin duyệt'); await loadPage(); }catch(err){ toast(err.message,false); } }
 async function adminServices(){ services=await api('/api/services'); $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Admin - Quản lý dịch vụ</h2><p class="muted">Dịch vụ đồng bộ từ API mặc định sẽ ẩn. Admin tự tìm kiếm, bật hiện và chỉnh giá trước khi bán.</p><div class="row3"><div class="field"><label>Tên dịch vụ</label><input id="sName"></div><div class="field"><label>Service ID API</label><input id="sAppId" placeholder="VD: 1001"></div><div class="field"><label>Giá bán cho user</label><input id="sPrice" type="number"></div></div><div class="row"><div class="field"><label>Nhà mạng cho phép / Network ID</label><input id="sNet" placeholder="Bỏ trống để tự động, hoặc nhập ID nhà mạng"></div><div class="field"><label>Mô tả</label><input id="sDesc"></div></div><div class="field"><label>Ảnh sản phẩm/dịch vụ</label><input id="sImage" type="file" accept="image/*"></div><button onclick="addService()">Thêm dịch vụ</button></div><div class="card"><h3>Danh sách dịch vụ</h3><div class="field"><label>Tìm kiếm dịch vụ</label><input id="serviceSearch" placeholder="Nhập tên dịch vụ, App ID hoặc nhà mạng" oninput="renderServiceTable()"></div><div class="full-actions"><button class="danger" onclick="hideAllServices()">Ẩn tất cả dịch vụ</button><button class="secondary" onclick="renderServiceTable()">Làm mới danh sách</button></div><div id="serviceTable">${tableServices(services)}</div></div>`); }
@@ -537,7 +333,27 @@ async function testApiAccount(provider='legacy'){ try{ const d=await api('/api/a
 async function testBothApi(){ try{ const a=await Promise.allSettled([api('/api/admin/sim-api/account?provider=legacy'),api('/api/admin/sim-api/account?provider=codesim')]); $('#apiResult').textContent=JSON.stringify({legacy:a[0].status==='fulfilled'?a[0].value:{error:a[0].reason.message},codesim:a[1].status==='fulfilled'?a[1].value:{error:a[1].reason.message}},null,2); }catch(e){ $('#apiResult').textContent=e.message; toast(e.message,false); } }
 async function syncApiApps(){ try{ const d=await api('/api/admin/sim-api/sync-apps',{method:'POST',body:JSON.stringify({overwritePrice:false})}); $('#apiResult').textContent=JSON.stringify(d,null,2); toast(`Đã đồng bộ: thêm ${d.added}, cập nhật ${d.updated}`); }catch(e){ $('#apiResult').textContent=e.message; toast(e.message,false); } }
 async function delService(id){ if(confirm('Xóa dịch vụ này?')){ await api('/api/admin/services/'+id,{method:'DELETE'}); await loadPage(); } }
-async function adminHistory(){ adminRentals=await api('/api/admin/rentals'); const dmx=await api('/api/admin/dmx/orders').catch(()=>({rows:[],stats:{}})); $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Admin - Tất cả lịch sử thuê</h2><div class="tablewrap"><table class="table"><tr><th>User</th><th>Dịch vụ</th><th>Nhà mạng</th><th>Số sim</th><th>Giá</th><th>Trạng thái</th><th>OTP</th><th>Thời gian</th><th>Lưu</th></tr>${adminRentals.map(r=>`<tr><td>${esc(r.username)}</td><td>${esc(r.service_name)}</td><td>${esc(r.network)}</td><td>${esc(r.phone_number)}</td><td>${fmt(r.price)}</td><td><input id="rs_${r.id}" value="${esc(r.status)}"></td><td><input id="otp_${r.id}" value="${esc(r.otp_code||'')}"></td><td>${date(r.rented_at)}</td><td><button class="small" onclick="saveRental('${r.id}')">Lưu</button></td></tr>`).join('')}</table></div></div><div class="card"><h2>Admin - Lịch sử mua DMX</h2><div class="stats"><span class="pill">Tổng đơn: <b>${dmx.stats?.totalOrders||0}</b></span><span class="pill">Doanh thu: <b>${fmt(dmx.stats?.revenue||0)}</b></span></div>${tableDmxOrders(dmx.rows||[],true)}</div>`); }
+function todayInputValue(){
+  const d = new Date();
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(d);
+  const obj = Object.fromEntries(parts.map(x => [x.type, x.value]));
+  return `${obj.year}-${obj.month}-${obj.day}`;
+}
+function tableRentalStats(rows){
+  if(!rows || !rows.length) return '<p class="muted">Hôm nay chưa có giao dịch thuê sim.</p>';
+  return `<div class="tablewrap"><table class="table"><tr><th>Dịch vụ</th><th>Giá</th><th>Tổng thuê</th><th>Thành công</th><th>Hết hạn/hoàn</th><th>Đang chờ/khác</th><th>Tổng thu</th></tr>${rows.map(x=>`<tr><td>${esc(x.service_name)}</td><td>${fmt(x.price)}</td><td><b>${x.total||0}</b></td><td><span class="badge status-ok">${x.success||0}</span></td><td><span class="badge status-no">${x.expired||0}</span></td><td><span class="badge status-wait">${x.other||0}</span></td><td><b>${fmt(x.revenue)}</b></td></tr>`).join('')}</table></div>`;
+}
+function tableDmxStats(rows){
+  if(!rows || !rows.length) return '<p class="muted">Hôm nay chưa có giao dịch DMX.</p>';
+  return `<div class="tablewrap"><table class="table"><tr><th>Dịch vụ DMX</th><th>Số đơn</th><th>Số lượng</th><th>Tổng thu</th></tr>${rows.map(x=>`<tr><td>${esc(x.product_name)}</td><td>${x.orders||0}</td><td><b>${x.quantity||0}</b></td><td><b>${fmt(x.revenue)}</b></td></tr>`).join('')}</table></div>`;
+}
+async function adminHistory(){
+  const statDate = window.adminHistoryDate || todayInputValue();
+  adminRentals = await api('/api/admin/rentals');
+  const stats = await api('/api/admin/rentals/stats?date=' + encodeURIComponent(statDate)).catch(()=>null);
+  const dmx = await api('/api/admin/dmx/orders').catch(()=>({rows:[],stats:{}}));
+  $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Admin - Thống kê giao dịch trong ngày</h2><div class="row"><div class="field"><label>Chọn ngày thống kê</label><input id="adminStatDate" type="date" value="${esc(statDate)}" onchange="window.adminHistoryDate=this.value; loadPage()"></div><div class="field"><label>Tổng tiền tất cả user đã giao dịch</label><div class="big-number">${fmt(stats?.revenue||0)}</div></div></div><div class="stats"><span class="pill">Thuê sim: <b>${fmt(stats?.rentals?.revenue||0)}</b></span><span class="pill">Thành công: <b>${stats?.rentals?.success||0}</b></span><span class="pill">Hết hạn/hoàn: <b>${stats?.rentals?.expired||0}</b></span><span class="pill">DMX: <b>${fmt(stats?.dmx?.revenue||0)}</b></span></div><h3>Thống kê dịch vụ thuê sim</h3>${tableRentalStats(stats?.rentals?.services||[])}<h3 style="margin-top:16px">Thống kê dịch vụ DMX</h3>${tableDmxStats(stats?.dmx?.products||[])}</div><div class="card"><h2>Admin - Tất cả lịch sử thuê</h2><div class="tablewrap"><table class="table"><tr><th>User</th><th>Dịch vụ</th><th>Nhà mạng</th><th>Số sim</th><th>Giá</th><th>Trạng thái</th><th>OTP</th><th>Thời gian</th><th>Lưu</th></tr>${adminRentals.map(r=>`<tr><td>${esc(r.username)}</td><td>${esc(r.service_name)}</td><td>${esc(r.network)}</td><td>${esc(r.phone_number)}</td><td>${fmt(r.price)}</td><td><input id="rs_${r.id}" value="${esc(r.status)}"></td><td><input id="otp_${r.id}" value="${esc(r.otp_code||'')}"></td><td>${date(r.rented_at)}</td><td><button class="small" onclick="saveRental('${r.id}')">Lưu</button></td></tr>`).join('')}</table></div></div><div class="card"><h2>Admin - Lịch sử mua DMX</h2><div class="stats"><span class="pill">Tổng đơn: <b>${dmx.stats?.totalOrders||0}</b></span><span class="pill">Doanh thu: <b>${fmt(dmx.stats?.revenue||0)}</b></span></div>${tableDmxOrders(dmx.rows||[],true)}</div>`);
+}
 async function saveRental(id){ await api('/api/admin/rentals/'+id,{method:'PATCH',body:JSON.stringify({status:$('#rs_'+id).value,otp_code:$('#otp_'+id).value})}); toast('Đã lưu lượt thuê'); }
 async function adminDepositInfo(){ const keyFromEnv=settings.binanceApiKeyFromEnv===true; const secretFromEnv=settings.binanceApiSecretFromEnv===true; const keyDisabled=keyFromEnv?'disabled':''; const secretDisabled=secretFromEnv?'disabled':''; const keyHint=keyFromEnv?'<small class="muted">🔒 Đang đọc từ biến môi trường <code>BINANCE_API_KEY</code> — không thể sửa từ web</small>':''; const secretHint=secretFromEnv?'<small class="muted">🔒 Đang đọc từ biến môi trường <code>BINANCE_API_SECRET</code> — không thể sửa từ web</small>':''; $('.main').insertAdjacentHTML('beforeend', `<div class="card"><h2>Admin - Thông tin nhận tiền nạp</h2><div class="field"><label>Thông tin chuyển khoản thủ công</label><textarea id="depositInfo">${esc(settings.depositInfo||'')}</textarea></div><div class="field"><label>Ảnh QR thủ công hiện tại</label><br>${settings.qrImage?`<img class="qr" src="${esc(settings.qrImage)}">`:''}</div><div class="field"><label>Tải QR thủ công mới</label><input id="qrFile" type="file" accept="image/*"></div><h3>Cấu hình SePay tự động</h3><div class="row3"><div class="field"><label>Mã ngân hàng VietQR</label><input id="sepayBankCode" value="${esc(settings.sepayBankCode||'MB')}"></div><div class="field"><label>Số tài khoản</label><input id="sepayAccount" value="${esc(settings.sepayAccount||'')}"></div><div class="field"><label>Tên chủ tài khoản</label><input id="sepayAccountName" value="${esc(settings.sepayAccountName||'')}"></div></div><div class="field"><label>API Key Webhook SePay</label><input id="sepayWebhookApiKey" value="${esc(settings.sepayWebhookApiKey||'')}" placeholder="Nhập API key từ SePay.vn"></div><small class="muted">Lấy API key từ trang quản lý SePay → Webhook → API Key. Bắt buộc phải cấu hình để webhook hoạt động.</small><p class="notice">Webhook SePay cần trỏ tới: <b>${location.origin}/api/sepay/webhook</b></p><button onclick="saveDepositInfo()">Lưu thông tin nạp</button></div><div class="card"><h2>Cấu hình Binance Pay</h2><div class="row3"><div class="field"><label>Bật Binance Pay</label><select id="binanceEnabled"><option value="0">Tắt</option><option value="1" ${settings.binanceEnabled==='1'?'selected':''}>Bật</option></select></div><div class="field"><label>Tỉ giá USDT/VND</label><input id="binanceUsdtVndRate" type="number" min="0" value="${esc(settings.binanceUsdtVndRate||'26000')}"></div><div class="field"><label>Prefix nội dung (2-10 ký tự HOA)</label><input id="binanceContentPrefix" value="${esc(settings.binanceContentPrefix||'BNCDV')}" oninput="this.value=this.value.toUpperCase()" maxlength="10"></div></div><div class="row"><div class="field"><label>Binance API Key</label><input id="binanceApiKey" ${keyDisabled} value="${keyFromEnv?'':esc(settings.binanceApiKey||'')}" placeholder="${keyFromEnv?'(từ biến môi trường)':'Lấy từ Binance API Management'}">${keyHint}</div><div class="field"><label>Binance API Secret</label><input id="binanceApiSecret" type="password" ${secretDisabled} value="${secretFromEnv?'':esc(settings.binanceApiSecret||'')}" placeholder="${secretFromEnv?'(từ biến môi trường)':'Bí mật, không chia sẻ'}">${secretHint}</div></div><p class="muted">Hiện tại: API Key ${esc(settings.binanceApiKeyMasked||'Chưa cài')} - API Secret ${esc(settings.binanceApiSecretMasked||'Chưa cài')}</p><div class="row3"><div class="field"><label>Min USDT</label><input id="binanceMinUsdt" type="number" min="0" value="${esc(settings.binanceMinUsdt||'1')}"></div><div class="field"><label>Max USDT</label><input id="binanceMaxUsdt" type="number" min="0" value="${esc(settings.binanceMaxUsdt||'10000')}"></div><div class="field"><label>Hết hạn (phút)</label><input id="binanceExpiryMinutes" type="number" min="1" value="${esc(settings.binanceExpiryMinutes||'30')}"></div></div><div class="field"><label>Tên người nhận hiển thị cho user</label><input id="binancePayeeName" value="${esc(settings.binancePayeeName||'')}" placeholder="VD: Nguyen Van A"></div><div class="field"><label>Ảnh QR Binance Pay hiện tại</label><br>${settings.binanceQrImage?`<img class="qr" src="${esc(settings.binanceQrImage)}">`:'<p class="muted">Chưa có QR. Hãy tải lên ảnh QR Binance Pay của bạn.</p>'}</div><div class="field"><label>Tải QR Binance Pay mới (lấy từ app Binance → Pay → My QR)</label><input id="binanceQrFile" type="file" accept="image/*"></div><div class="flex"><button onclick="saveBinanceSettings()">Lưu cấu hình Binance</button><button class="secondary" onclick="testBinanceApi()">Test API kết nối</button><button class="secondary" onclick="checkBinanceNow()">Quét giao dịch ngay</button></div><div id="binanceAdminResult" class="notice" style="white-space:pre-wrap;margin-top:12px"></div><h3 style="margin-top:18px">Lịch sử giao dịch Binance đã xử lý</h3><div id="binanceTxList"><p class="muted">Bấm "Quét giao dịch ngay" hoặc "Tải lịch sử" để xem.</p></div><button class="secondary" onclick="loadBinanceTransactions()">Tải lịch sử</button></div>`); }
 async function saveBinanceSettings(){

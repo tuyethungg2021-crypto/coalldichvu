@@ -17,17 +17,6 @@ Bảo mật:
 - Mỗi giao dịch Binance đã xử lý lưu vào `db.binanceTransactions` với `transactionId` để chống double-credit.
 - Lệnh nạp quá hạn tự động được đánh dấu `Hết hạn` ở mỗi tick worker.
 
-## Highland Referral trả phí
-
-Web hỗ trợ bán lượt chạy Highland Referral cho user bằng số dư hiện có:
-
-1. Admin deploy service xử lý Highland riêng theo spec tại `/Users/macos/Document/LLO/Highland/API_SERVER_MGT`.
-2. Vào tab **Admin Highland** để bật chức năng, đặt giá mỗi lượt, nhập Remote API URL và API key.
-3. User nạp tiền bằng các luồng hiện có, sau đó vào tab **Highland Referral** để mua lượt bằng số dư.
-4. Khi user nhập mã giới thiệu và submit, web reserve 1 lượt, gọi remote service từ backend, rồi tự poll trạng thái.
-5. Khi remote service hoàn thành 1 lượt đăng ký thành công, web hiển thị `done` và lượt đã mua được tiêu thụ.
-
-
 ## Tài khoản admin mặc định
 
 - Tài khoản: `hungnbyt`
@@ -92,7 +81,6 @@ Lưu ý với host miễn phí: nếu host xóa ổ đĩa khi restart thì datab
 
 - Đăng ký, đăng nhập
 - Thuê sim theo dịch vụ/nhà mạng
-- Mua và sử dụng lượt Highland Referral khi admin bật chức năng
 - Xem sim đang thuê
 - Xem lịch sử thuê
 - Thuê lại
@@ -113,7 +101,6 @@ Lưu ý với host miễn phí: nếu host xóa ổ đĩa khi restart thì datab
 - Duyệt/từ chối nạp tiền
 - Khi duyệt nạp, tiền tự cộng vào tài khoản user
 - Quản lý user
-- Bật/tắt Highland Referral, set giá, cấu hình remote API và xem lịch sử xử lý
 - Tăng/giảm/sửa số dư user
 - Đổi mật khẩu user
 - Xóa user
