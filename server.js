@@ -61,7 +61,7 @@ function daysInactive(u) {
 }
 
 const defaults = {
-  users: [], services: [], rentals: [], deposits: [], notifications: [], dmxProducts: [], dmxOrders: [], sepayTransactions: [], binanceTransactions: [],
+  users: [], services: [], rentals: [], deposits: [], notifications: [], dmxProducts: [], dmxOrders: [], sepayTransactions: [], binanceTransactions: [], transfers: [],
   settings: {
     siteName: 'Có All Dịch Vụ',
     brandText: 'Thuê sim nhanh - nhiều nhà mạng - quản lý dễ dàng',
@@ -93,7 +93,7 @@ let db = null;
 
 function normalizeDb(parsed) {
   parsed = parsed || {};
-  return { ...defaults, ...parsed, dmxProducts: parsed.dmxProducts || [], dmxOrders: parsed.dmxOrders || [], sepayTransactions: parsed.sepayTransactions || [], binanceTransactions: parsed.binanceTransactions || [], settings: { ...defaults.settings, ...(parsed.settings || {}) } };
+  return { ...defaults, ...parsed, dmxProducts: parsed.dmxProducts || [], dmxOrders: parsed.dmxOrders || [], sepayTransactions: parsed.sepayTransactions || [], binanceTransactions: parsed.binanceTransactions || [], transfers: parsed.transfers || [], settings: { ...defaults.settings, ...(parsed.settings || {}) } };
 }
 async function loadDb() {
   if (MONGODB_URI) {
@@ -138,6 +138,10 @@ async function migrate() {
     db.users.push({ id: uid('u'), username: ADMIN_USERNAME, password_hash: bcrypt.hashSync(ADMIN_PASSWORD, 10), role: 'admin', balance: 0, created_at: now(), last_login: now(), status: 'active' });
     changed = true;
   }
+  for (const u of db.users || []) {
+    if (u.transfer_enabled === undefined) { u.transfer_enabled = false; changed = true; }
+  }
+  db.transfers = db.transfers || [];
   if (!db.services.length) {
     [
       ['Facebook', 'Viettel', 2500, 'Thuê sim nhận OTP Facebook'],
@@ -195,7 +199,7 @@ function sign(user) {
   if (!user.current_session) user.current_session = createSessionId();
   return jwt.sign({ id: user.id, username: user.username, role: user.role, sid: user.current_session }, JWT_SECRET, { expiresIn: '7d' });
 }
-function cleanUser(u) { return u ? { id: u.id, username: u.username, role: u.role, balance: u.balance || 0, created_at: u.created_at, last_login: u.last_login, status: u.status || 'active' } : null; }
+function cleanUser(u) { return u ? { id: u.id, username: u.username, role: u.role, balance: u.balance || 0, created_at: u.created_at, last_login: u.last_login, status: u.status || 'active', transfer_enabled: !!u.transfer_enabled } : null; }
 function auth(req, res, next) {
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/, '');
   if (!token) return res.status(401).json({ error: 'Bạn chưa đăng nhập' });
@@ -933,9 +937,69 @@ app.post('/api/upload', auth, adminOnly, upload.single('file'), async (req, res)
   } catch (e) { res.status(500).json({ error: e.message || 'Không upload được ảnh' }); }
 });
 
+
+const STATS_START_DATE = '2026-07-06T00:00:00.000+07:00';
+function afterStatsStart(v) {
+  const t = new Date(v || 0).getTime();
+  return Number.isFinite(t) && t >= new Date(STATS_START_DATE).getTime();
+}
+function approvedDeposit(d) { return String(d.status || '') === 'Đã duyệt'; }
+function userMoneyStats(userId) {
+  const depositsTotal = (db.deposits || []).filter(d => d.user_id === userId && approvedDeposit(d) && afterStatsStart(d.reviewed_at || d.created_at)).reduce((s,d)=>s+Math.floor(Number(d.amount||0)),0);
+  const rentalsUsed = (db.rentals || []).filter(r => r.user_id === userId && afterStatsStart(r.rented_at || r.created_at)).reduce((s,r)=>s+Math.max(0, Math.floor(Number(r.price||0)) - Math.floor(Number(r.refunded||0))),0);
+  const dmxUsed = (db.dmxOrders || []).filter(o => o.user_id === userId && afterStatsStart(o.created_at)).reduce((s,o)=>s+Math.floor(Number(o.total||0)),0);
+  const sent = (db.transfers || []).filter(t => t.from_user_id === userId && String(t.status || 'success') === 'success' && afterStatsStart(t.created_at)).reduce((s,t)=>s+Math.floor(Number(t.amount||0)),0);
+  const received = (db.transfers || []).filter(t => t.to_user_id === userId && String(t.status || 'success') === 'success' && afterStatsStart(t.created_at)).reduce((s,t)=>s+Math.floor(Number(t.amount||0)),0);
+  return { deposits_total: depositsTotal, used_total: rentalsUsed + dmxUsed, rentals_used: rentalsUsed, dmx_used: dmxUsed, transfer_sent: sent, transfer_received: received };
+}
+function globalMoneyStats() {
+  const userStats = (db.users || []).map(u => userMoneyStats(u.id));
+  return {
+    from: STATS_START_DATE,
+    deposits_total: userStats.reduce((s,x)=>s+x.deposits_total,0),
+    used_total: userStats.reduce((s,x)=>s+x.used_total,0),
+    transfer_total: (db.transfers || []).filter(t => String(t.status || 'success') === 'success' && afterStatsStart(t.created_at)).reduce((s,t)=>s+Math.floor(Number(t.amount||0)),0),
+    users_total: (db.users || []).length,
+    rentals_total: (db.rentals || []).filter(r => afterStatsStart(r.rented_at || r.created_at)).length,
+    dmx_orders_total: (db.dmxOrders || []).filter(o => afterStatsStart(o.created_at)).length
+  };
+}
+let transferLock = Promise.resolve();
+function withTransferLock(fn) {
+  transferLock = transferLock.catch(()=>{}).then(fn);
+  return transferLock;
+}
+app.get('/api/stats/global', auth, adminOnly, (req, res) => res.json(globalMoneyStats()));
+app.get('/api/transfers', auth, (req, res) => {
+  const rows = (db.transfers || []).filter(t => req.user.role === 'admin' || t.from_user_id === req.user.id || t.to_user_id === req.user.id)
+    .map(t => ({ ...t, from_username: (db.users.find(u => u.id === t.from_user_id) || {}).username || 'unknown', to_username: (db.users.find(u => u.id === t.to_user_id) || {}).username || 'unknown' }))
+    .sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at))).slice(0, 300);
+  res.json(rows);
+});
+app.post('/api/transfers', auth, (req, res) => withTransferLock(async () => {
+  const amount = Math.floor(Number(req.body.amount || 0));
+  const receiverRaw = String(req.body.receiver || '').trim();
+  const note = String(req.body.note || '').trim().slice(0, 200);
+  if (!req.user.transfer_enabled) return res.status(403).json({ error: 'Tài khoản của bạn chưa được admin mở chức năng chuyển tiền' });
+  if (amount < 20000) return res.status(400).json({ error: 'Số tiền chuyển tối thiểu là 20.000đ' });
+  if (!receiverRaw) return res.status(400).json({ error: 'Thiếu tài khoản người nhận' });
+  const to = (db.users || []).find(u => String(u.username).toLowerCase() === receiverRaw.toLowerCase() || String(u.id) === receiverRaw);
+  if (!to || to.status !== 'active') return res.status(404).json({ error: 'Không tìm thấy người nhận hoặc tài khoản đã bị khóa' });
+  if (to.id === req.user.id) return res.status(400).json({ error: 'Không thể chuyển tiền cho chính mình' });
+  if (Math.floor(Number(req.user.balance || 0)) < amount) return res.status(400).json({ error: 'Số dư không đủ' });
+  req.user.balance = Math.floor(Number(req.user.balance || 0) - amount);
+  to.balance = Math.floor(Number(to.balance || 0) + amount);
+  db.transfers = db.transfers || [];
+  const tr = { id: uid('tr'), from_user_id: req.user.id, to_user_id: to.id, amount, note, status: 'success', created_at: now(), ip: req.ip, user_agent: String(req.headers['user-agent'] || '') };
+  db.transfers.push(tr);
+  db.notifications.push({ id: uid('n'), type: 'transfer', message: `${req.user.username} chuyển ${amount.toLocaleString('vi-VN')}đ cho ${to.username}`, read: 0, created_at: now() });
+  await saveDb();
+  res.json({ transfer: { ...tr, from_username: req.user.username, to_username: to.username }, user: cleanUser(req.user) });
+}));
+
 app.get('/api/admin/users', auth, adminOnly, (req, res) => {
   const limit = Math.min(Math.max(parseInt(req.query.limit || '300', 10) || 300, 1), 1000);
-  res.json(db.users.map(u => ({ ...cleanUser(u), days_inactive: daysInactive(u) })).sort((a,b) => a.role.localeCompare(b.role) || a.username.localeCompare(b.username)).slice(0, limit));
+  res.json(db.users.map(u => ({ ...cleanUser(u), ...userMoneyStats(u.id), days_inactive: daysInactive(u) })).sort((a,b) => a.role.localeCompare(b.role) || a.username.localeCompare(b.username)).slice(0, limit));
 });
 app.patch('/api/admin/users/:id', auth, adminOnly, (req, res) => {
   const user = db.users.find(u => u.id === req.params.id); if (!user) return res.status(404).json({ error: 'Không tìm thấy user' });
@@ -949,11 +1013,12 @@ app.patch('/api/admin/users/:id', auth, adminOnly, (req, res) => {
     user.status = String(req.body.status);
     if (user.status !== 'active') user.current_session = createSessionId();
   }
+  if (req.body.transfer_enabled !== undefined) user.transfer_enabled = !!req.body.transfer_enabled;
   saveDb(); res.json(cleanUser(user));
 });
 app.delete('/api/admin/users/:id', auth, adminOnly, (req, res) => {
   if (req.params.id === req.user.id) return res.status(400).json({ error: 'Không thể xóa chính bạn' });
-  db.users = db.users.filter(u => u.id !== req.params.id); db.rentals = db.rentals.filter(r => r.user_id !== req.params.id); db.deposits = db.deposits.filter(d => d.user_id !== req.params.id); db.dmxOrders = (db.dmxOrders||[]).filter(o => o.user_id !== req.params.id); saveDb(); res.json({ ok: true });
+  db.users = db.users.filter(u => u.id !== req.params.id); db.rentals = db.rentals.filter(r => r.user_id !== req.params.id); db.deposits = db.deposits.filter(d => d.user_id !== req.params.id); db.dmxOrders = (db.dmxOrders||[]).filter(o => o.user_id !== req.params.id); db.transfers = (db.transfers||[]).filter(t => t.from_user_id !== req.params.id && t.to_user_id !== req.params.id); saveDb(); res.json({ ok: true });
 });
 
 app.post('/api/admin/services', auth, adminOnly, (req, res) => {
