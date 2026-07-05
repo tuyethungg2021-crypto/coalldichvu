@@ -42,6 +42,16 @@ const useCloudinary = !!(CLOUDINARY_URL || (CLOUDINARY_CLOUD_NAME && CLOUDINARY_
 let mongoClient = null;
 let stateCollection = null;
 let saveQueue = Promise.resolve();
+const userRentLocks = new Map();
+function withUserRentLock(userId, fn) {
+  const key = String(userId || '');
+  const prev = userRentLocks.get(key) || Promise.resolve();
+  const run = prev.catch(() => {}).then(fn);
+  userRentLocks.set(key, run.finally(() => {
+    if (userRentLocks.get(key) === run) userRentLocks.delete(key);
+  }));
+  return run;
+}
 function now() { return new Date().toISOString(); }
 function uid(prefix) { return prefix + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8); }
 function daysInactive(u) {
@@ -62,7 +72,7 @@ const defaults = {
     apiBaseUrl: 'https://chaycodeso3.com/api',
     apiProvider: 'legacy',
     apiKey: '248c26ea0cd1371009db5dd443339ca1',
-    otpTimeoutMinutes: '20',
+    otpTimeoutMinutes: '10',
     sepayWebhookApiKey: process.env.SEPAY_WEBHOOK_API_KEY || '',
     binanceEnabled: '0',
     binanceApiKey: '',
@@ -117,6 +127,12 @@ function saveDb() {
 }
 async function migrate() {
   let changed = false;
+  // Theo yêu cầu: thời gian chờ OTP mặc định là 10 phút.
+  // Nếu database cũ vẫn đang để mặc định 20 phút thì tự chuyển về 10 phút.
+  if (!db.settings.otpTimeoutMinutes || String(db.settings.otpTimeoutMinutes) === '20') {
+    db.settings.otpTimeoutMinutes = '10';
+    changed = true;
+  }
   if (!db.users.find(u => u.username === ADMIN_USERNAME)) {
     db.users.push({ id: uid('u'), username: ADMIN_USERNAME, password_hash: bcrypt.hashSync(ADMIN_PASSWORD, 10), role: 'admin', balance: 0, created_at: now(), last_login: now(), status: 'active' });
     changed = true;
@@ -186,8 +202,8 @@ function providerCfg(provider) {
   };
 }
 function getOtpTimeoutMinutes() {
-  const n = Number(db.settings.otpTimeoutMinutes || 20);
-  return Number.isFinite(n) && n > 0 ? n : 20;
+  const n = Number(db.settings.otpTimeoutMinutes || 10);
+  return Number.isFinite(n) && n > 0 ? n : 10;
 }
 function buildUrlWithBase(base, pathname, params = {}) {
   const url = new URL(base + pathname);
@@ -251,38 +267,57 @@ async function cancelExternalRental(r) {
     return null;
   }
 }
-async function expireRentalNoRefund(r, reason = 'Hết thời gian chờ OTP') {
-  // Nhà cung cấp API đã cấp số thì web đã phát sinh chi phí.
-  // Không tự hoàn tiền cho user khi hết hạn để tránh lỗ: API thuê 114 nhưng web chỉ thu các đơn có OTP.
-  if (!r || r.otp_code || r.status === 'Đã nhận code') return false;
-  r.refunded = 0;
+async function expireRentalWithRefund(r, reason = 'Hết 10 phút chưa có OTP, hệ thống tự hoàn tiền') {
+  // Hết thời gian chờ OTP: hủy sim bên API nếu có thể, đánh dấu hết hạn và hoàn tiền 1 lần cho user.
+  // Chặn hoàn tiền lặp bằng refunded/refunded_at/ended_at.
+  if (!r || r.otp_code || r.status === 'Đã nhận code' || r.refunded) return false;
+  const u = db.users.find(x => x.id === r.user_id);
+  const refundAmount = Math.max(0, Math.floor(Number(r.price || 0)));
   r.status = 'Hết hạn';
   r.ended_at = r.ended_at || now();
+  r.refunded = refundAmount;
+  r.refunded_at = r.refunded_at || now();
   r.note = reason;
+  if (u && refundAmount > 0) {
+    u.balance = Math.floor(Number(u.balance || 0) + refundAmount);
+  }
   await cancelExternalRental(r);
   return true;
 }
+let processExpiredRentalsLock = Promise.resolve();
 async function processExpiredRentals() {
-  const timeoutMs = getOtpTimeoutMinutes() * 60 * 1000;
-  let changed = false;
-  for (const r of db.rentals || []) {
-    const waiting = !r.otp_code && !r.refunded && !r.ended_at && String(r.status || '').toLowerCase().includes('chờ');
-    if (!waiting) continue;
-    const t = new Date(r.rented_at || r.created_at || now()).getTime();
-    if (Date.now() - t >= timeoutMs) {
-      await expireRentalNoRefund(r);
-      changed = true;
+  processExpiredRentalsLock = processExpiredRentalsLock.catch(() => {}).then(async () => {
+    const timeoutMs = getOtpTimeoutMinutes() * 60 * 1000;
+    let changed = false;
+    for (const r of db.rentals || []) {
+      const waiting = !r.otp_code && !r.refunded && !r.ended_at && String(r.status || '').toLowerCase().includes('chờ');
+      if (!waiting) continue;
+      const t = new Date(r.rented_at || r.created_at || now()).getTime();
+      if (Date.now() - t >= timeoutMs) {
+        const didChange = await expireRentalWithRefund(r);
+        changed = changed || didChange;
+      }
     }
-  }
-  if (changed) saveDb();
+    if (changed) saveDb();
+  });
+  return processExpiredRentalsLock;
+}
+function maskSecret(v) {
+  v = String(v || '');
+  return v ? (v.slice(0, 6) + '...' + v.slice(-4)) : '';
 }
 function safeSettingsForUser(settings, isAdmin) {
   const out = { ...settings };
-  if (!isAdmin) { delete out.apiKey; delete out.legacyApiKey; delete out.codesimApiKey; delete out.sepayWebhookApiKey; delete out.binanceApiKey; delete out.binanceApiSecret; }
-  if (isAdmin && out.legacyApiKey) out.legacyApiKeyMasked = out.legacyApiKey.slice(0, 6) + '...' + out.legacyApiKey.slice(-4);
-  if (isAdmin && out.codesimApiKey) out.codesimApiKeyMasked = out.codesimApiKey.slice(0, 6) + '...' + out.codesimApiKey.slice(-4);
-  if (isAdmin && out.apiKey) out.apiKeyMasked = out.apiKey.slice(0, 6) + '...' + out.apiKey.slice(-4);
-  if (isAdmin && out.sepayWebhookApiKey) out.sepayWebhookApiKeyMasked = out.sepayWebhookApiKey.slice(0, 6) + '...' + out.sepayWebhookApiKey.slice(-4);
+  const legacy = String(settings.legacyApiKey || settings.apiKey || '');
+  const codesim = String(settings.codesimApiKey || '');
+  const sepay = String(settings.sepayWebhookApiKey || '');
+  // Không trả API key thật ra trình duyệt, kể cả trang admin.
+  // Admin chỉ thấy key đã che và nhập key mới nếu muốn đổi.
+  delete out.apiKey; delete out.legacyApiKey; delete out.codesimApiKey; delete out.sepayWebhookApiKey; delete out.binanceApiKey; delete out.binanceApiSecret;
+  if (isAdmin && legacy) out.legacyApiKeyMasked = maskSecret(legacy);
+  if (isAdmin && settings.apiKey) out.apiKeyMasked = maskSecret(settings.apiKey);
+  if (isAdmin && codesim) out.codesimApiKeyMasked = maskSecret(codesim);
+  if (isAdmin && sepay) out.sepayWebhookApiKeyMasked = maskSecret(sepay);
   if (isAdmin) {
     const effKey = (typeof getBinanceApiKey === 'function') ? getBinanceApiKey() : '';
     const effSecret = (typeof getBinanceApiSecret === 'function') ? getBinanceApiSecret() : '';
@@ -372,12 +407,14 @@ app.get('/api/services', auth, (req, res) => {
   const rows = db.services.filter(s => req.user.role === 'admin' || Number(s.visible) === 1).sort((a,b) => (b.visible-a.visible) || a.name.localeCompare(b.name));
   res.json(rows);
 });
-app.post('/api/rentals', auth, async (req, res) => {
-  // Chống thuê âm tiền / bấm nhiều máy cùng lúc:
-  // phải trừ tiền (giữ tiền) ngay trên server trước khi gọi API cấp số.
-  // Vì Node chạy từng đoạn sync một, các request sau sẽ thấy số dư đã bị trừ và bị chặn.
+app.post('/api/rentals', auth, async (req, res) => withUserRentLock(req.user.id, async () => {
+  // Chống thuê âm tiền / thuê không trừ tiền:
+  // khóa tuần tự theo từng user, lấy giá từ server, trừ/giữ tiền trước khi gọi API.
+  // Hết 10 phút chưa có OTP sẽ tự hủy/hoàn tiền 1 lần.
+  // Lỗi mạng/timeout sau khi đã gửi request thuê vẫn cần admin kiểm tra để tránh hoàn nhầm khi API đã cấp số.
   let reserved = false;
   let reserveAmount = 0;
+  let apiRequestStarted = false;
   try {
     const service = db.services.find(s => s.id === req.body.service_id && Number(s.visible) === 1);
     if (!service) return res.status(404).json({ error: 'Dịch vụ không tồn tại hoặc đang ẩn' });
@@ -398,6 +435,7 @@ app.post('/api/rentals', auth, async (req, res) => {
     saveDb();
 
     const networkId = String(req.body.carrier || '').trim();
+    apiRequestStarted = true;
     const apiResult = await simApi(service.provider || 'legacy', 'rent', { service_id: service.external_app_id, appId: service.external_app_id, carrier: networkId, network_id: networkId });
 
     const refundAndError = (statusCode, payload) => {
@@ -433,14 +471,31 @@ app.post('/api/rentals', auth, async (req, res) => {
     saveDb();
     res.json({ rental, user: cleanUser(req.user), api: apiResult });
   } catch (e) {
-    // Nếu lỗi xảy ra trước khi API cấp số thành công thì hoàn lại khoản đã giữ.
-    if (reserved) {
+    if (reserved && !apiRequestStarted) {
+      // Chỉ hoàn tiền khi lỗi xảy ra trước lúc gửi request sang nhà cung cấp.
       req.user.balance = Math.floor(Number(req.user.balance || 0) + reserveAmount);
       saveDb();
+      return res.status(500).json({ error: e.message || 'Không gọi được API thuê sim', user: cleanUser(req.user) });
     }
+
+    if (reserved && apiRequestStarted) {
+      // Đã gửi request thuê sang API: không tự hoàn tiền, tránh trường hợp API đã trừ tiền nhưng web hoàn lại.
+      const service = db.services.find(s => s.id === req.body.service_id) || {};
+      const rental = {
+        id: uid('r'), user_id: req.user.id, service_id: service.id || String(req.body.service_id || ''), service_name: service.name || 'Không rõ dịch vụ',
+        network: String(req.body.carrier || '').trim() || 'Mặc định', phone_number: '', price: reserveAmount, api_cost: 0,
+        external_id: '', external_sim_id: '', api_app_id: String(service.external_app_id || ''), provider: service.provider || 'legacy',
+        status: 'Lỗi API cần kiểm tra', rented_at: now(), ended_at: now(), otp_code: '', sms: '', refunded: 0,
+        note: 'Đã trừ tiền nhưng API lỗi/timeout sau khi gửi request: ' + (e.message || 'Không gọi được API thuê sim')
+      };
+      db.rentals.push(rental);
+      saveDb();
+      return res.status(502).json({ error: 'API thuê sim lỗi/timeout sau khi đã gửi yêu cầu. Tiền đã được trừ để tránh thuê miễn phí, admin sẽ kiểm tra nếu cần.', rental, user: cleanUser(req.user) });
+    }
+
     res.status(500).json({ error: e.message || 'Không gọi được API thuê sim', user: cleanUser(req.user) });
   }
-});
+}));
 app.get('/api/rentals', auth, async (req, res) => { await processExpiredRentals(); res.json(db.rentals.filter(r => r.user_id === req.user.id).sort((a,b) => b.rented_at.localeCompare(a.rented_at))); });
 app.get('/api/rentals/stats', auth, async (req, res) => { await processExpiredRentals(); res.json(buildDailyStats(String(req.query.date || '').trim(), req.user.id)); });
 
@@ -977,7 +1032,13 @@ app.patch('/api/admin/settings', auth, adminOnly, (req, res) => {
   if (req.body.binanceApiSecret !== undefined && isBinanceApiSecretFromEnv()) {
     return res.status(400).json({ error: 'Binance API secret đang lấy từ biến môi trường BINANCE_API_SECRET, không thể chỉnh từ web' });
   }
-  ['siteName','brandText','logoUrl','adUrl','themeColor','layoutMode','depositInfo','qrImage','apiBaseUrl','apiKey','apiProvider','legacyApiBaseUrl','legacyApiKey','codesimApiBaseUrl','codesimApiKey','otpTimeoutMinutes','sepayBankCode','sepayAccount','sepayAccountName','sepayEnabled','sepayWebhookApiKey','binanceEnabled','binanceApiKey','binanceApiSecret','binanceUsdtVndRate','binanceContentPrefix','binanceMinUsdt','binanceMaxUsdt','binancePayeeName','binanceExpiryMinutes','binanceQrImage'].forEach(k => { if (req.body[k] !== undefined) db.settings[k] = String(req.body[k]); });
+  const secretKeys = new Set(['apiKey','legacyApiKey','codesimApiKey','sepayWebhookApiKey','binanceApiKey','binanceApiSecret']);
+  ['siteName','brandText','logoUrl','adUrl','themeColor','layoutMode','depositInfo','qrImage','apiBaseUrl','apiKey','apiProvider','legacyApiBaseUrl','legacyApiKey','codesimApiBaseUrl','codesimApiKey','otpTimeoutMinutes','sepayBankCode','sepayAccount','sepayAccountName','sepayEnabled','sepayWebhookApiKey','binanceEnabled','binanceApiKey','binanceApiSecret','binanceUsdtVndRate','binanceContentPrefix','binanceMinUsdt','binanceMaxUsdt','binancePayeeName','binanceExpiryMinutes','binanceQrImage'].forEach(k => {
+    if (req.body[k] === undefined) return;
+    const v = String(req.body[k]);
+    if (secretKeys.has(k) && v.trim() === '') return; // để trống = giữ key cũ, tránh frontend làm lộ/ghi đè key
+    db.settings[k] = v;
+  });
   saveDb();
   res.json(safeSettingsForUser(db.settings, true));
 });
