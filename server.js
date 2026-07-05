@@ -400,6 +400,7 @@ app.post('/api/rentals', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message || 'Không gọi được API thuê sim' }); }
 });
 app.get('/api/rentals', auth, async (req, res) => { await processExpiredRentals(); res.json(db.rentals.filter(r => r.user_id === req.user.id).sort((a,b) => b.rented_at.localeCompare(a.rented_at))); });
+app.get('/api/rentals/stats', auth, async (req, res) => { await processExpiredRentals(); res.json(buildDailyStats(String(req.query.date || '').trim(), req.user.id)); });
 
 app.post('/api/rentals/:id/check-code', auth, async (req, res) => {
   try {
@@ -831,47 +832,69 @@ function isRentalExpired(r) {
   const note = String(r.note || '').toLowerCase();
   return !!r.refunded || st.includes('hết hạn') || st.includes('het han') || st.includes('hoàn tiền') || st.includes('hoan tien') || note.includes('hết thời gian') || note.includes('het thoi gian');
 }
-function buildAdminDailyStats(dateKey) {
+function buildDailyStats(dateKey, userId = '') {
   const target = dateKey || vnDateKey(new Date());
-  const rentals = (db.rentals || []).filter(r => vnDateKey(r.rented_at || r.created_at) === target);
+  const rentals = (db.rentals || []).filter(r => (!userId || r.user_id === userId) && vnDateKey(r.rented_at || r.created_at) === target);
   const rentalServices = {};
+  const userRows = {};
+  const ensureUserRow = (uid) => {
+    if (!uid) uid = 'unknown';
+    if (!userRows[uid]) {
+      const u = (db.users || []).find(x => x.id === uid) || {};
+      userRows[uid] = { user_id: uid, username: u.username || 'unknown', rental_total: 0, success: 0, expired: 0, other: 0, rental_revenue: 0, dmx_orders: 0, dmx_quantity: 0, dmx_revenue: 0, total_revenue: 0 };
+    }
+    return userRows[uid];
+  };
   for (const r of rentals) {
     const name = String(r.service_name || 'Không rõ dịch vụ');
     if (!rentalServices[name]) rentalServices[name] = { service_name: name, price: Number(r.price || 0), total: 0, success: 0, expired: 0, other: 0, revenue: 0 };
     const row = rentalServices[name];
+    const ur = ensureUserRow(r.user_id);
     row.total += 1;
+    ur.rental_total += 1;
     row.price = Number(r.price || row.price || 0);
-    if (isRentalSuccess(r)) { row.success += 1; row.revenue += Number(r.price || 0); }
-    else if (isRentalExpired(r)) row.expired += 1;
-    else row.other += 1;
+    if (isRentalSuccess(r)) { row.success += 1; row.revenue += Number(r.price || 0); ur.success += 1; ur.rental_revenue += Number(r.price || 0); ur.total_revenue += Number(r.price || 0); }
+    else if (isRentalExpired(r)) { row.expired += 1; ur.expired += 1; }
+    else { row.other += 1; ur.other += 1; }
   }
   const rentalRows = Object.values(rentalServices).sort((a,b) => b.revenue - a.revenue || b.success - a.success || a.service_name.localeCompare(b.service_name));
   const rentalRevenue = rentalRows.reduce((sum, x) => sum + Number(x.revenue || 0), 0);
   const rentalTotal = rentalRows.reduce((sum, x) => sum + Number(x.total || 0), 0);
   const rentalSuccess = rentalRows.reduce((sum, x) => sum + Number(x.success || 0), 0);
   const rentalExpired = rentalRows.reduce((sum, x) => sum + Number(x.expired || 0), 0);
+  const rentalOther = rentalRows.reduce((sum, x) => sum + Number(x.other || 0), 0);
 
-  const dmxOrders = (db.dmxOrders || []).filter(o => vnDateKey(o.created_at) === target);
+  const dmxOrders = (db.dmxOrders || []).filter(o => (!userId || o.user_id === userId) && vnDateKey(o.created_at) === target);
   const dmxProducts = {};
   for (const o of dmxOrders) {
     const name = String(o.product_name || 'Không rõ sản phẩm');
     if (!dmxProducts[name]) dmxProducts[name] = { product_name: name, quantity: 0, orders: 0, revenue: 0 };
+    const qty = Number(o.quantity || 0);
+    const total = Number(o.total || 0);
     dmxProducts[name].orders += 1;
-    dmxProducts[name].quantity += Number(o.quantity || 0);
-    dmxProducts[name].revenue += Number(o.total || 0);
+    dmxProducts[name].quantity += qty;
+    dmxProducts[name].revenue += total;
+    const ur = ensureUserRow(o.user_id);
+    ur.dmx_orders += 1;
+    ur.dmx_quantity += qty;
+    ur.dmx_revenue += total;
+    ur.total_revenue += total;
   }
   const dmxRows = Object.values(dmxProducts).sort((a,b) => b.revenue - a.revenue || b.quantity - a.quantity || a.product_name.localeCompare(b.product_name));
   const dmxRevenue = dmxRows.reduce((sum, x) => sum + Number(x.revenue || 0), 0);
   const dmxTotalOrders = dmxRows.reduce((sum, x) => sum + Number(x.orders || 0), 0);
   const dmxTotalQuantity = dmxRows.reduce((sum, x) => sum + Number(x.quantity || 0), 0);
+  const users = Object.values(userRows).sort((a,b) => b.total_revenue - a.total_revenue || b.success - a.success || String(a.username).localeCompare(String(b.username)));
 
   return {
     date: target,
     revenue: rentalRevenue + dmxRevenue,
-    rentals: { total: rentalTotal, success: rentalSuccess, expired: rentalExpired, revenue: rentalRevenue, services: rentalRows },
-    dmx: { orders: dmxTotalOrders, quantity: dmxTotalQuantity, revenue: dmxRevenue, products: dmxRows }
+    rentals: { total: rentalTotal, success: rentalSuccess, expired: rentalExpired, other: rentalOther, revenue: rentalRevenue, services: rentalRows },
+    dmx: { orders: dmxTotalOrders, quantity: dmxTotalQuantity, revenue: dmxRevenue, products: dmxRows },
+    users
   };
 }
+function buildAdminDailyStats(dateKey) { return buildDailyStats(dateKey); }
 app.get('/api/admin/rentals', auth, adminOnly, async (req, res) => { await processExpiredRentals(); res.json(db.rentals.map(r => ({ ...r, username: (db.users.find(u => u.id === r.user_id) || {}).username || 'unknown' })).sort((a,b) => b.rented_at.localeCompare(a.rented_at))); });
 app.get('/api/admin/rentals/stats', auth, adminOnly, async (req, res) => { await processExpiredRentals(); res.json(buildAdminDailyStats(String(req.query.date || '').trim())); });
 app.patch('/api/admin/rentals/:id', auth, adminOnly, (req, res) => {
