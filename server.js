@@ -391,7 +391,7 @@ app.post('/api/rentals', auth, async (req, res) => {
     const displayNumber = String(phone || '');
     const rental = {
       id: uid('r'), user_id: req.user.id, service_id: service.id, service_name: service.name,
-      network: networkId || service.network || '', phone_number: displayNumber, price: service.price, api_cost: cost,
+      network: networkId || 'Mặc định', phone_number: displayNumber, price: service.price, api_cost: cost,
       external_id: String(otpId || ''), external_sim_id: String(simId || ''), api_app_id: String(service.external_app_id), provider: service.provider || 'legacy',
       status: 'Đang chờ code', rented_at: now(), ended_at: '', otp_code: '', sms: '', note: apiResult.message || apiResult.Msg || ''
     };

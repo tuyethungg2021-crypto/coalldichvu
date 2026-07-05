@@ -177,3 +177,31 @@ body{overflow-x:hidden}.admin-service-list{display:grid;gap:12px}.admin-service-
   .svc .price{font-size:14px !important;}
 }
 .big-number{font-size:26px;font-weight:900;color:var(--ok);background:#f0fdf4;border:1px solid #bbf7d0;border-radius:14px;padding:10px 14px;display:inline-block;min-width:180px;text-align:center}
+
+
+/* Compact admin history: reduce empty space and make status/OTP cleaner */
+.admin-stats-card,
+.admin-history-card{padding:12px 14px}
+.admin-stats-card h2,
+.admin-history-card h2{font-size:22px;margin-bottom:8px}
+.admin-stats-card .field{margin-bottom:8px}
+.admin-stats-card .stats{margin:6px 0 10px;gap:7px}
+.admin-stats-card .pill{padding:6px 9px;font-size:13px}
+.admin-stats-card h3{font-size:17px;margin-bottom:6px}
+.admin-history-wrap{max-height:none;overflow-x:auto}
+.admin-history-table{table-layout:auto;font-size:14px;min-width:980px}
+.admin-history-table th,
+.admin-history-table td{padding:6px 8px;vertical-align:middle;line-height:1.2}
+.admin-history-table th{font-size:12px;white-space:nowrap}
+.admin-history-table .cell-user{max-width:150px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.admin-history-table .cell-service{max-width:130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.admin-history-table .cell-network{width:80px;white-space:nowrap}
+.admin-history-table .cell-phone{width:105px;white-space:nowrap}
+.admin-history-table .cell-price{width:76px;white-space:nowrap}
+.admin-history-table .cell-time{width:135px;font-size:12px;color:var(--muted)}
+.admin-history-table input,
+.admin-history-table select{border:1px solid #cbd5e1;border-radius:7px;padding:4px 6px;background:#fff;height:30px;font-size:14px}
+.admin-status-select{width:112px}
+.admin-otp-input{width:70px;text-align:center}
+.admin-save-btn{padding:6px 9px;border-radius:8px;font-size:12px}
+.table th,.table td{padding-top:7px;padding-bottom:7px}
