@@ -205,3 +205,8 @@ body{overflow-x:hidden}.admin-service-list{display:grid;gap:12px}.admin-service-
 .admin-otp-input{width:70px;text-align:center}
 .admin-save-btn{padding:6px 9px;border-radius:8px;font-size:12px}
 .table th,.table td{padding-top:7px;padding-bottom:7px}
+.usertable th,.usertable td{padding:6px 8px;font-size:13px;white-space:nowrap;vertical-align:middle}
+.usertable td input,.usertable td select{padding:6px 8px;height:32px;border:1px solid var(--line);border-radius:8px;background:#fff}
+.usertable .w-xs{width:70px}
+.usertable .w-sm{width:90px}
+.usertable .w-md{width:130px}

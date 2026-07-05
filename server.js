@@ -862,7 +862,9 @@ function globalMoneyStats() {
     users_total: (db.users || []).length,
     rentals_total: (db.rentals || []).filter(r => afterStatsStart(r.rented_at || r.created_at)).length,
     dmx_orders_total: (db.dmxOrders || []).filter(o => afterStatsStart(o.created_at)).length,
-    balance_total: (db.users || []).reduce((s,u)=>s+Math.floor(Number(u.balance||0)),0)
+    balance_total: (db.users || []).reduce((s,u)=>s+Math.floor(Number(u.balance||0)),0),
+    // Chỉ tính api_cost của các lượt THUÊ SIM (không tính DMX) — đây là số tiền thực sự bị trừ trong acc API key thuê sim.
+    api_key_sim_cost_total: (db.rentals || []).filter(r => afterStatsStart(r.rented_at || r.created_at)).reduce((s,r)=>s+Math.floor(Number(r.api_cost||0)),0)
   };
 }
 let transferLock = Promise.resolve();
