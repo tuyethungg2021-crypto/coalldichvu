@@ -861,7 +861,8 @@ function globalMoneyStats() {
     transfer_total: (db.transfers || []).filter(t => String(t.status || 'success') === 'success' && afterStatsStart(t.created_at)).reduce((s,t)=>s+Math.floor(Number(t.amount||0)),0),
     users_total: (db.users || []).length,
     rentals_total: (db.rentals || []).filter(r => afterStatsStart(r.rented_at || r.created_at)).length,
-    dmx_orders_total: (db.dmxOrders || []).filter(o => afterStatsStart(o.created_at)).length
+    dmx_orders_total: (db.dmxOrders || []).filter(o => afterStatsStart(o.created_at)).length,
+    balance_total: (db.users || []).reduce((s,u)=>s+Math.floor(Number(u.balance||0)),0)
   };
 }
 let transferLock = Promise.resolve();
