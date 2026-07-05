@@ -603,105 +603,7 @@ app.post('/api/rentals/:id/cancel', auth, async (req, res) => {
 
 function onlyDigits(v) { return String(v ?? '').replace(/[^0-9]/g, ''); }
 function normText(v) { return String(v ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9_]+/g, ' ').trim(); }
-function makeSepayCode(username) { return ('NAP ' + String(username || '').toLowerCase() + ' ' + Math.random().toString(36).slice(2, 7).toUpperCase()).trim(); }
-function buildSepayQr(amount, content) {
-  const bank = String(db.settings.sepayBankCode || process.env.SEPAY_BANK || 'MB').trim();
-  const account = String(db.settings.sepayAccount || process.env.SEPAY_ACCOUNT || '').trim();
-  const name = String(db.settings.sepayAccountName || process.env.SEPAY_ACCOUNT_NAME || '').trim();
-  if (!bank || !account) return '';
-  const q = new URLSearchParams();
-  if (amount) q.set('amount', String(Math.floor(Number(amount || 0))));
-  q.set('addInfo', String(content || ''));
-  if (name) q.set('accountName', name);
-  return `https://img.vietqr.io/image/${encodeURIComponent(bank)}-${encodeURIComponent(account)}-compact2.png?${q.toString()}`;
-}
-function extractSepayPayload(body) {
-  const b = body || {};
-  const amount = Math.floor(Number(b.transferAmount ?? b.amount ?? b.money ?? b.creditAmount ?? b.transactionAmount ?? b.value ?? 0));
-  const content = String(b.content ?? b.description ?? b.transferContent ?? b.transactionContent ?? b.transaction_content ?? b.memo ?? b.note ?? '');
-  const ref = String(b.id ?? b.referenceCode ?? b.reference_code ?? b.transactionId ?? b.transaction_id ?? b.gatewayTransactionId ?? b.code ?? b.transactionDate ?? '');
-  const type = String(b.transferType ?? b.type ?? b.direction ?? '').toLowerCase();
-  return { amount, content, ref, type };
-}
-function findUserBySepayContent(content) {
-  const normalized = normText(content);
-  return (db.users || []).find(u => normalized.includes(normText(u.username)));
-}
-function approveDeposit(dep, transactionRef, rawPayload) {
-  if (!dep || dep.status === 'Đã duyệt') return false;
-  const u = db.users.find(x => x.id === dep.user_id);
-  if (!u) return false;
-  u.balance = Math.floor(Number(u.balance || 0) + Number(dep.amount || 0));
-  dep.status = 'Đã duyệt';
-  dep.admin_note = 'Tự động cộng tiền qua SePay' + (transactionRef ? ` (${transactionRef})` : '');
-  dep.reviewed_at = now();
-  dep.sepay_ref = transactionRef || dep.sepay_ref || '';
-  dep.sepay_payload = rawPayload || dep.sepay_payload || null;
-  db.notifications.push({ id: uid('n'), type: 'deposit_auto', message: `Đã tự cộng ${Number(dep.amount||0).toLocaleString('vi-VN')}đ cho ${(u||{}).username || 'user'} qua SePay`, read: 0, created_at: now() });
-  return true;
-}
-
-app.post('/api/deposits/auto', auth, async (req, res) => {
-  try {
-    const amount = Math.floor(Number(req.body.amount || 0));
-    if (amount < 1000) return res.status(400).json({ error: 'Số tiền nạp tối thiểu 1.000đ' });
-    const code = makeSepayCode(req.user.username);
-    const qrUrl = buildSepayQr(amount, code);
-    const dep = { id: uid('d'), user_id: req.user.id, amount, content: code, proof_image: '', status: 'Chờ thanh toán', admin_note: 'Đang chờ SePay xác nhận', created_at: now(), reviewed_at: '', method: 'sepay', sepay_code: code, sepay_qr: qrUrl };
-    db.deposits.push(dep);
-    saveDb();
-    res.json({ deposit: dep, qrUrl, transferContent: code, bank: db.settings.sepayBankCode, account: db.settings.sepayAccount, accountName: db.settings.sepayAccountName });
-  } catch (e) { res.status(500).json({ error: e.message || 'Không tạo được lệnh nạp SePay' }); }
-});
-
-app.post('/api/sepay/webhook', async (req, res) => {
-  try {
-    const webhookKey = String(process.env.SEPAY_WEBHOOK_API_KEY || db.settings.sepayWebhookApiKey || '').trim();
-    const authHeader = String(req.headers['authorization'] || '').trim();
-    const providedKey = authHeader.replace(/^Apikey\s+/i, '').trim();
-
-    if (!webhookKey) {
-      console.warn('SEPAY WEBHOOK: No API key configured — rejecting request for security');
-      return res.status(401).json({ success: false, error: 'Webhook not configured' });
-    }
-    if (providedKey !== webhookKey) {
-      console.warn('SEPAY WEBHOOK: Invalid API key');
-      return res.status(401).json({ success: false, error: 'Unauthorized' });
-    }
-
-    db.sepayTransactions = db.sepayTransactions || [];
-    const payload = req.body || {};
-    console.log('SEPAY WEBHOOK RECEIVED:', JSON.stringify(payload).slice(0, 1500));
-    const { amount, content, ref, type } = extractSepayPayload(payload);
-    if (type && type.includes('out')) return res.json({ success: true, ignored: 'outgoing' });
-    if (!amount || amount <= 0 || !Number.isInteger(amount)) return res.json({ success: true, ignored: 'invalid_payload' });
-    if (!content || !String(content).trim()) return res.json({ success: true, ignored: 'invalid_payload' });
-    const txKey = ref || `${amount}:${content}:${JSON.stringify(payload).slice(0,200)}`;
-    if (db.sepayTransactions.some(t => t.key === txKey)) return res.json({ success: true, duplicate: true });
-
-    const normalized = normText(content);
-    let dep = (db.deposits || [])
-      .filter(d => ['Chờ thanh toán','Chờ duyệt'].includes(String(d.status || '')) && Math.floor(Number(d.amount || 0)) === amount)
-      .find(d => d.sepay_code && normalized.includes(normText(d.sepay_code)));
-
-    if (!dep) {
-      const user = findUserBySepayContent(content);
-      if (user) {
-        dep = (db.deposits || [])
-          .filter(d => ['Chờ thanh toán','Chờ duyệt'].includes(String(d.status || '')) && d.user_id === user.id && Math.floor(Number(d.amount || 0)) === amount)
-          .sort((a,b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
-      }
-    }
-
-    const credited = approveDeposit(dep, txKey, payload);
-    db.sepayTransactions.push({ key: txKey, amount, content, credited, deposit_id: dep ? dep.id : '', created_at: now(), payload });
-    saveDb();
-    return res.json({ success: true, credited, deposit_id: dep ? dep.id : null });
-  } catch (e) {
-    console.error('SEPAY WEBHOOK ERROR:', e);
-    return res.status(200).json({ success: false, error: e.message || 'Webhook error' });
-  }
-});
+// Đã gỡ bỏ toàn bộ nạp tiền thủ công/SePay theo yêu cầu: chỉ còn Binance Pay.
 
 // ---------- Binance Pay deposit ----------
 function getBinanceConfig() {
@@ -925,17 +827,7 @@ app.post('/api/admin/binance/test', auth, adminOnly, async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: e.message || 'Không gọi được Binance API' }); }
 });
 
-app.post('/api/deposits', auth, upload.single('proof'), async (req, res) => {
-  try {
-    const amount = Math.floor(Number(req.body.amount || 0));
-    if (amount <= 0) return res.status(400).json({ error: 'Số tiền nạp không hợp lệ' });
-    const proofUrl = req.file ? await uploadToCloudinary(req.file, 'coalldichvu/deposits') : '';
-    const dep = { id: uid('d'), user_id: req.user.id, amount, content: String(req.body.content || ''), proof_image: proofUrl, status: 'Chờ duyệt', admin_note: '', created_at: now(), reviewed_at: '' };
-    db.deposits.push(dep);
-    db.notifications.push({ id: uid('n'), type: 'deposit', message: `${req.user.username} gửi yêu cầu nạp ${amount.toLocaleString('vi-VN')}đ`, read: 0, created_at: now() });
-    saveDb(); res.json(dep);
-  } catch (e) { res.status(500).json({ error: e.message || 'Không upload được ảnh chứng từ' }); }
-});
+// Đã gỡ bỏ nạp tiền thủ công (upload ảnh chứng từ) — chỉ còn Binance Pay.
 app.get('/api/deposits', auth, (req, res) => res.json(db.deposits.filter(d => d.user_id === req.user.id).sort((a,b) => b.created_at.localeCompare(a.created_at))));
 app.post('/api/upload', auth, adminOnly, upload.single('file'), async (req, res) => {
   try {
